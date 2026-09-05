@@ -1,6 +1,6 @@
 import base64
 import re
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 
 import pandas as pd
@@ -1118,13 +1118,20 @@ def create_tracker_table(data):
     return tracker
 
 
-def create_channel_tracker_table(data, registration_type):
+def create_channel_tracker_table(
+    data, registration_type, mode="cumulative"
+):
     """
-    Same cumulative category tracker as create_tracker_table, but
-    restricted to one registration channel (Public/"Retail",
-    Group Registration, or Complimentary). Used to build the
-    retail-only, corporate-only and complimentary-only daily
-    cumulative tables.
+    Category tracker restricted to one registration channel
+    (Public/"Retail", Group Registration, or Complimentary).
+
+    mode="cumulative" (default): category rows are the running
+    total up to each date, with a "Cumulative" total row and a
+    "Daily Registrations" row showing that day's new count for
+    reference.
+
+    mode="daily": category rows are that day's new registrations
+    only (not accumulated), with a "Daily Total" row.
     """
     filtered = data[
         data["Registration Type"].eq(registration_type)
@@ -1135,38 +1142,48 @@ def create_channel_tracker_table(data, registration_type):
     if daily_pivot.empty:
         return daily_pivot
 
-    cumulative_pivot = daily_pivot.cumsum(axis=1)
+    if mode == "daily":
+        tracker = daily_pivot.copy()
 
-    tracker = cumulative_pivot.copy()
+        tracker.loc["Daily Total"] = (
+            daily_pivot.sum(axis=0)
+        )
+    else:
+        cumulative_pivot = daily_pivot.cumsum(axis=1)
 
-    tracker.loc["Cumulative"] = (
-        cumulative_pivot.sum(axis=0)
-    )
+        tracker = cumulative_pivot.copy()
 
-    tracker.loc["Daily Registrations"] = (
-        daily_pivot.sum(axis=0)
-    )
+        tracker.loc["Cumulative"] = (
+            cumulative_pivot.sum(axis=0)
+        )
+
+        tracker.loc["Daily Registrations"] = (
+            daily_pivot.sum(axis=0)
+        )
 
     tracker.index.name = "Category"
 
     return tracker
 
 
-def create_all_channel_trackers(data):
+def create_all_channel_trackers(data, mode="cumulative"):
     """
-    Build the three channel-specific cumulative trackers in one
-    call: Retail (Public), Corporate (Group Registration) and
-    Complimentary. Returns a dict keyed by display label.
+    Build the three channel-specific trackers in one call: Retail
+    (Public), Corporate (Group Registration) and Complimentary.
+    Returns a dict keyed by display label. See
+    create_channel_tracker_table for what mode controls.
     """
     return {
         "Retail (excl. corporate & complimentary)": (
-            create_channel_tracker_table(data, "Public")
+            create_channel_tracker_table(
+                data, "Public", mode=mode
+            )
         ),
         "Corporate": create_channel_tracker_table(
-            data, "Group Registration"
+            data, "Group Registration", mode=mode
         ),
         "Complimentary": create_channel_tracker_table(
-            data, "Complimentary"
+            data, "Complimentary", mode=mode
         ),
     }
 
@@ -1551,6 +1568,8 @@ def create_market_split_table(data, market_column, label):
         },
         index=["Singapore", "Non-Singapore", "Grand Total"],
     )
+
+    table.index.name = "Market"
 
     return table
 
@@ -2943,6 +2962,52 @@ def format_tracker_worksheet(worksheet):
 # EXCEL EXPORT
 # =========================================================
 
+def create_archive_csv_bundle(tables):
+    """
+    Stack multiple tables into a single CSV for archiving: each
+    table is preceded by a plain-text header row naming it, then
+    its own header row and data, then a blank separator row
+    before the next table. Tables that are None or empty are
+    skipped. Any DataFrame index with a name (Category, Segment,
+    Corporate Group, etc.) is written out as its own column so
+    row labels are not lost.
+
+    Because the tables have very different shapes and column
+    counts (a handful of columns for a demographic split, 90+
+    date columns for a daily tracker), this file will look
+    visually uneven if opened directly in Excel — that unevenness
+    is expected, and does not affect re-parsing the file later.
+    """
+    output = StringIO()
+
+    for table_name, table in tables.items():
+        if table is None or table.empty:
+            continue
+
+        output.write(f"{table_name}\n")
+
+        export_table = table.copy()
+
+        if not isinstance(export_table.index, pd.RangeIndex):
+            if export_table.index.name is None:
+                export_table.index.name = table_name
+
+            export_table = export_table.reset_index()
+
+        export_table.columns = [
+            column.strftime("%d-%b-%Y")
+            if isinstance(column, pd.Timestamp)
+            else column
+            for column in export_table.columns
+        ]
+
+        export_table.to_csv(output, index=False)
+
+        output.write("\n")
+
+    return output.getvalue().encode("utf-8-sig")
+
+
 def create_excel_report(
     original_data,
     filtered_data,
@@ -2966,6 +3031,7 @@ def create_excel_report(
     age_category_gender_grid,
     capacity_segment_table,
     channel_trackers,
+    channel_trackers_daily,
     complimentary_category_display,
 ):
     """
@@ -3100,6 +3166,23 @@ def create_excel_report(
                 ),
             )
 
+        for channel_label, channel_tracker in (
+            channel_trackers_daily.items()
+        ):
+            if channel_tracker.empty:
+                continue
+
+            short_channel = (
+                channel_label.split(" ")[0]
+            )
+
+            channel_tracker.to_excel(
+                writer,
+                sheet_name=(
+                    f"Tracker {short_channel} Daily"[:31]
+                ),
+            )
+
         daily_summary.to_excel(
             writer,
             sheet_name="Daily Registrations",
@@ -3182,6 +3265,9 @@ def create_excel_report(
         ] + [
             f"Tracker {channel_label.split(' ')[0]}"[:31]
             for channel_label in channel_trackers
+        ] + [
+            f"Tracker {channel_label.split(' ')[0]} Daily"[:31]
+            for channel_label in channel_trackers_daily
         ]
 
         for worksheet_name in standard_worksheet_names:
@@ -3686,11 +3772,83 @@ capacity_segment_table = create_capacity_segment_table(
     category_column=category_column,
 )
 
-channel_trackers = create_all_channel_trackers(filtered_df)
+channel_trackers = create_all_channel_trackers(
+    filtered_df, mode="cumulative"
+)
+
+channel_trackers_daily = create_all_channel_trackers(
+    filtered_df, mode="daily"
+)
 
 complimentary_category_counts, complimentary_category_display = (
     create_complimentary_category_table(filtered_df)
 )
+
+excel_report_bytes = create_excel_report(
+    original_data=source_df,
+    filtered_data=filtered_df,
+    category_summary=category_summary,
+    category_pace=category_pace,
+    daily_summary=daily_summary,
+    age_summary=age_summary,
+    gender_summary=gender_summary,
+    country_summary=country_summary,
+    quality_summary=quality_summary,
+    tracker_table=tracker_table,
+    target_progress=target_progress,
+    registration_mix_table=registration_mix_table,
+    corporate_category_display=corporate_category_display,
+    addon_summary_table=addon_summary_table,
+    addon_market_category_trackers=addon_market_category_trackers,
+    country_market_table=country_market_table,
+    nationality_market_table=nationality_market_table,
+    age_gender_table=age_gender_table,
+    category_gender_table=category_gender_table,
+    age_category_gender_grid=age_category_gender_grid,
+    capacity_segment_table=capacity_segment_table,
+    channel_trackers=channel_trackers,
+    channel_trackers_daily=channel_trackers_daily,
+    complimentary_category_display=complimentary_category_display,
+)
+
+archive_csv_bytes = create_archive_csv_bundle(
+    tables={
+        "SG vs Non-SG (Country)": country_market_table,
+        "SG vs Non-SG (Nationality)": nationality_market_table,
+        "Age & Gender Splits": age_gender_table,
+        "Category & Gender Splits": category_gender_table,
+        "Age x Category x Gender": age_category_gender_grid,
+        "Capacity by Segment": capacity_segment_table,
+        "Corporate Utilisation": corporate_category_counts,
+        "Complimentary Utilisation": (
+            complimentary_category_counts
+        ),
+        "Category Summary": category_summary,
+        "Target Progress": target_progress,
+        "Tracker - Retail (Cumulative)": channel_trackers.get(
+            "Retail (excl. corporate & complimentary)"
+        ),
+        "Tracker - Corporate (Cumulative)": (
+            channel_trackers.get("Corporate")
+        ),
+        "Tracker - Complimentary (Cumulative)": (
+            channel_trackers.get("Complimentary")
+        ),
+        "Tracker - Retail (Daily)": (
+            channel_trackers_daily.get(
+                "Retail (excl. corporate & complimentary)"
+            )
+        ),
+        "Tracker - Corporate (Daily)": (
+            channel_trackers_daily.get("Corporate")
+        ),
+        "Tracker - Complimentary (Daily)": (
+            channel_trackers_daily.get("Complimentary")
+        ),
+    }
+)
+
+original_filename = Path(uploaded_file.name).stem
 
 
 # =========================================================
@@ -3740,6 +3898,46 @@ with snapshot_tab:
     st.caption(
         f"As of {latest_snapshot_date} — the same figures "
         "management reviews weekly, in one place."
+    )
+
+    snapshot_download_col_1, snapshot_download_col_2 = (
+        st.columns(2)
+    )
+
+    with snapshot_download_col_1:
+        st.download_button(
+            label="Download Full Report (Excel)",
+            data=excel_report_bytes,
+            file_name=(
+                f"{original_filename}_registration_analysis.xlsx"
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+            key="snapshot_download_excel",
+        )
+
+    with snapshot_download_col_2:
+        st.download_button(
+            label="Download All Tables (CSV)",
+            data=archive_csv_bytes,
+            file_name=(
+                f"{original_filename}_archive_tables.csv"
+            ),
+            mime="text/csv",
+            use_container_width=True,
+            key="snapshot_download_csv",
+        )
+
+    st.caption(
+        "Both buttons bundle every table across the Executive "
+        "Snapshot, Executive Overview and Registration Tracker "
+        "into one file — the Excel version keeps each table on "
+        "its own sheet; the CSV version stacks them one after "
+        "another with a header row naming each table, for a "
+        "plain-text archive baseline."
     )
 
     if filtered_df.empty:
@@ -6204,16 +6402,36 @@ with tracker_tab:
     st.markdown("#### By Channel: Retail, Corporate & Complimentary")
 
     st.caption(
-        "The same cumulative-by-category tracker, split into "
-        "three views by registration channel — so it's clear how "
-        "much of any day's growth was organic retail demand "
-        "versus a corporate batch or a complimentary allocation."
+        "The same by-category tracker, split into three views by "
+        "registration channel — so it's clear how much of any "
+        "day's growth was organic retail demand versus a "
+        "corporate batch or a complimentary allocation."
     )
 
-    channel_tabs = st.tabs(list(channel_trackers.keys()))
+    channel_view_mode = st.radio(
+        "View",
+        options=["Cumulative", "Daily"],
+        horizontal=True,
+        key="channel_tracker_view_mode",
+        help=(
+            "Cumulative shows the running total up to each date. "
+            "Daily shows that day's new registrations only, per "
+            "category, without accumulating."
+        ),
+    )
+
+    active_channel_trackers = (
+        channel_trackers
+        if channel_view_mode == "Cumulative"
+        else channel_trackers_daily
+    )
+
+    channel_tabs = st.tabs(
+        list(active_channel_trackers.keys())
+    )
 
     for channel_tab, (channel_label, channel_tracker) in zip(
-        channel_tabs, channel_trackers.items()
+        channel_tabs, active_channel_trackers.items()
     ):
         with channel_tab:
             if channel_tracker.empty:
@@ -6231,45 +6449,31 @@ with tracker_tab:
 
     st.markdown("#### Download Report")
 
-    excel_report = create_excel_report(
-        original_data=source_df,
-        filtered_data=filtered_df,
-        category_summary=category_summary,
-        category_pace=category_pace,
-        daily_summary=daily_summary,
-        age_summary=age_summary,
-        gender_summary=gender_summary,
-        country_summary=country_summary,
-        quality_summary=quality_summary,
-        tracker_table=tracker_table,
-        target_progress=target_progress,
-        registration_mix_table=registration_mix_table,
-        corporate_category_display=corporate_category_display,
-        addon_summary_table=addon_summary_table,
-        addon_market_category_trackers=addon_market_category_trackers,
-        country_market_table=country_market_table,
-        nationality_market_table=nationality_market_table,
-        age_gender_table=age_gender_table,
-        category_gender_table=category_gender_table,
-        age_category_gender_grid=age_category_gender_grid,
-        capacity_segment_table=capacity_segment_table,
-        channel_trackers=channel_trackers,
-        complimentary_category_display=complimentary_category_display,
-    )
+    download_col_1, download_col_2 = st.columns(2)
 
-    original_filename = Path(
-        uploaded_file.name
-    ).stem
+    with download_col_1:
+        st.download_button(
+            label="Download Full Report (Excel)",
+            data=excel_report_bytes,
+            file_name=(
+                f"{original_filename}_registration_analysis.xlsx"
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+            key="tracker_download_excel",
+        )
 
-    st.download_button(
-        label="Download Marathon Registration Analysis",
-        data=excel_report,
-        file_name=(
-            f"{original_filename}_registration_analysis.xlsx"
-        ),
-        mime=(
-            "application/vnd.openxmlformats-officedocument."
-            "spreadsheetml.sheet"
-        ),
-        use_container_width=True,
-    )
+    with download_col_2:
+        st.download_button(
+            label="Download All Tables (CSV)",
+            data=archive_csv_bytes,
+            file_name=(
+                f"{original_filename}_archive_tables.csv"
+            ),
+            mime="text/csv",
+            use_container_width=True,
+            key="tracker_download_csv",
+        )
