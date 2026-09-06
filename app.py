@@ -8,6 +8,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -240,7 +241,30 @@ REGISTRATION_CLOSE_DATE = pd.Timestamp("2026-09-30")
 # executive nothing.
 REGISTRATION_OPEN_DATE = pd.Timestamp("2026-04-27")
 
+# The "momentum period" timing analysis excludes the launch-hype
+# window entirely (not just the single launch day), so day/hour
+# patterns reflect steady-state demand rather than opening buzz.
+LAUNCH_HYPE_END_DATE = pd.Timestamp("2026-04-30")
+
 LAUNCH_COLOR = "#7B2D8B"       # Launch-day bar (known outlier)
+
+# The Corporate/Complimentary Utilisation sheets in the final
+# report use six consolidated, short-label category columns
+# rather than the app's eight internal categories: the two Kids
+# Dash 1.6KM categories are combined into one "Kids (1.6)" column,
+# and BYD Marathon Crew Challenge has no column at all, matching
+# the reference report's layout.
+FINAL_REPORT_CATEGORY_MAP = {
+    "Marathon": ["BYD Marathon"],
+    "Half Marathon": ["adidas Half Marathon"],
+    "10km": ["Standard Chartered 10km"],
+    "5km": ["5km"],
+    "Kids (1.6)": [
+        "Kids Dash Competitive 1.6KM",
+        "Kids Dash Non-Competitive 1.6KM",
+    ],
+    "Kids (600)": ["Kids Dash Non-Competitive 600m"],
+}
 
 # Targets are defined per "target group". The two Kids Dash 1.6KM
 # categories share one combined target of 1,500 (per management
@@ -1875,25 +1899,22 @@ def classify_capacity_segment(row):
     return "International"
 
 
-def create_capacity_segment_table(
-    data,
-    group_corporate_column=None,
-    category_column=None,
+def compute_capacity_segments(
+    data, group_corporate_column=None, category_column=None
 ):
     """
-    Actual registered/sold counts per capacity segment, by race
-    category group (Marathon, Half Marathon, 10km, 5km, Kids
-    Dash), with a TOTAL row and TOTAL column. Slots/Remaining
-    columns are intentionally not produced here — those are
-    planning targets maintained outside the registration system,
-    not something the export can supply.
+    Shared setup for the capacity tables: filters to mapped
+    categories and adds a "_segment" column classifying each row.
+    Used by both create_capacity_segment_table (one combined
+    matrix) and create_slot_breakdown_tables (one block per
+    category group, matching the final report's layout).
     """
     valid = data[
         data["Grouped Category"].ne("Unmapped")
     ].copy()
 
     if valid.empty:
-        return pd.DataFrame()
+        return valid
 
     valid["_group_corporate_raw"] = (
         data[group_corporate_column]
@@ -1908,6 +1929,29 @@ def create_capacity_segment_table(
     valid["_segment"] = valid.apply(
         classify_capacity_segment, axis=1
     )
+
+    return valid
+
+
+def create_capacity_segment_table(
+    data,
+    group_corporate_column=None,
+    category_column=None,
+):
+    """
+    Actual registered/sold counts per capacity segment, by race
+    category group (Marathon, Half Marathon, 10km, 5km, Kids
+    Dash), with a TOTAL row and TOTAL column. Slots/Remaining
+    columns are intentionally not produced here — those are
+    planning targets maintained outside the registration system,
+    not something the export can supply.
+    """
+    valid = compute_capacity_segments(
+        data, group_corporate_column, category_column
+    )
+
+    if valid.empty:
+        return pd.DataFrame()
 
     table = pd.DataFrame(
         0,
@@ -1952,6 +1996,95 @@ def create_capacity_segment_table(
     table.index.name = "Segment"
 
     return table
+
+
+def create_slot_breakdown_tables(
+    data,
+    group_corporate_column=None,
+    category_column=None,
+):
+    """
+    One table per capacity group (Marathon, Half Marathon, 10km,
+    5km, Kids Dash), matching the Slot Breakdown reference sheet:
+    segment rows, a TOTAL row, actual Registered/Sold counts, and
+    three blank Slots columns plus a blank Remaining column left
+    for manual entry — those are planning targets tracked outside
+    the registration system.
+    """
+    valid = compute_capacity_segments(
+        data, group_corporate_column, category_column
+    )
+
+    tables = {}
+
+    if valid.empty:
+        return tables
+
+    for group_name, group_definition in CAPACITY_GROUPS.items():
+        main_category = group_definition["main"]
+
+        group_rows = valid[
+            valid["Grouped Category"].eq(main_category)
+        ]
+
+        segment_counts = group_rows["_segment"].value_counts()
+
+        # Nested rows (Crew Challenge) are inserted right after
+        # National Championship and before Local, matching the
+        # reference sheet's row order — not appended at the end.
+        insert_after = "National Championship"
+
+        row_labels = []
+        registered = []
+
+        for segment in CAPACITY_SEGMENT_ORDER:
+            row_labels.append(segment)
+
+            registered.append(
+                int(segment_counts.get(segment, 0))
+                if segment not in CAPACITY_PLACEHOLDER_SEGMENTS
+                else 0
+            )
+
+            if segment == insert_after:
+                for (
+                    nested_label,
+                    nested_category,
+                ) in group_definition["nested"]:
+                    row_labels.append(nested_label)
+
+                    registered.append(
+                        int(
+                            valid["Grouped Category"]
+                            .eq(nested_category)
+                            .sum()
+                        )
+                    )
+
+        block = pd.DataFrame(
+            {
+                "Slots (scenario 1)": [None] * len(row_labels),
+                "Slots (scenario 2)": [None] * len(row_labels),
+                "Slots (scenario 3)": [None] * len(row_labels),
+                "Registered/Sold": registered,
+                "Remaining": [None] * len(row_labels),
+            },
+            index=row_labels,
+        )
+
+        block.loc["TOTAL"] = [
+            None,
+            None,
+            None,
+            int(block["Registered/Sold"].sum()),
+            None,
+        ]
+
+        block.index.name = "Segment"
+
+        tables[group_name] = block
+
+    return tables
 
 
 def create_corporate_category_table(data):
@@ -2020,6 +2153,167 @@ def create_corporate_category_table(data):
         )
 
     return counts, display
+
+
+# =========================================================
+# FINAL REPORT TABLES
+# =========================================================
+
+def consolidate_categories_for_final_report(counts_table):
+    """
+    Collapse an 8-category counts table (rows = client/programme,
+    columns = the app's internal categories) down to the six
+    short-label columns used in the final report's Corporate and
+    Complimentary Utilisation sheets. See FINAL_REPORT_CATEGORY_MAP.
+    """
+    if counts_table.empty:
+        return counts_table
+
+    source = counts_table.drop(
+        columns="Total", errors="ignore"
+    )
+
+    result = pd.DataFrame(index=source.index)
+
+    for short_label, source_categories in (
+        FINAL_REPORT_CATEGORY_MAP.items()
+    ):
+        existing = [
+            category
+            for category in source_categories
+            if category in source.columns
+        ]
+
+        result[short_label] = (
+            source[existing].sum(axis=1)
+            if existing
+            else 0
+        )
+
+    result["Total"] = result.sum(axis=1)
+
+    result = result.sort_values(
+        "Total", ascending=False
+    )
+
+    result.index.name = counts_table.index.name
+
+    return result
+
+
+def create_weekday_totals_table(data):
+    """
+    Single-row weekday totals (Monday through Sunday, plus an
+    overall Total column) matching the Registration Timing &
+    Days reference sheet.
+    """
+    valid = data[data["Registration Date Only"].notna()]
+
+    if valid.empty:
+        return pd.DataFrame()
+
+    counts = (
+        valid["Registration Weekday"]
+        .value_counts()
+        .reindex(WEEKDAY_ORDER, fill_value=0)
+    )
+
+    table = pd.DataFrame(
+        [counts.values],
+        columns=[day[:3] for day in WEEKDAY_ORDER],
+        index=["Registration"],
+    )
+
+    table["Total"] = int(counts.sum())
+
+    return table
+
+
+def hour_to_label_block_order(hour):
+    """
+    Convert a 24-hour value into (12-hour label, AM/PM block,
+    position within that block), matching the reference sheet's
+    two 12-row blocks: 1:00 am .. 12:00 pm, then 1:00 pm .. 12:00
+    am.
+    """
+    if hour == 0:
+        return "12:00 am", "PM", 12
+
+    if hour < 12:
+        return f"{hour}:00 am", "AM", hour
+
+    if hour == 12:
+        return "12:00 pm", "AM", 12
+
+    return f"{hour - 12}:00 pm", "PM", hour - 12
+
+
+def create_hourly_am_pm_tables(data):
+    """
+    Two 12-row tables of registrations by hour, split into the
+    reference sheet's AM block (1:00 am - 12:00 pm) and PM block
+    (1:00 pm - 12:00 am).
+    """
+    valid = data[data["Registration Date Only"].notna()]
+
+    if valid.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    counts = valid["Registration Hour"].value_counts()
+
+    am_rows = []
+    pm_rows = []
+
+    for hour in range(24):
+        label, block, order = hour_to_label_block_order(
+            hour
+        )
+
+        count = int(counts.get(hour, 0))
+
+        if block == "AM":
+            am_rows.append((order, label, count))
+        else:
+            pm_rows.append((order, label, count))
+
+    am_rows.sort(key=lambda row: row[0])
+    pm_rows.sort(key=lambda row: row[0])
+
+    am_table = pd.DataFrame(
+        [(label, count) for _, label, count in am_rows],
+        columns=["Time", "Registrations"],
+    )
+
+    pm_table = pd.DataFrame(
+        [(label, count) for _, label, count in pm_rows],
+        columns=["Time", "Registrations"],
+    )
+
+    return am_table, pm_table
+
+
+def build_timing_commentary(weekday_table):
+    """
+    A short, data-driven sentence naming the best-performing
+    days, computed from the actual weekday totals rather than
+    fixed text — so it stays accurate as new data is uploaded.
+    """
+    if weekday_table.empty:
+        return "Not enough data to summarise."
+
+    day_counts = (
+        weekday_table.drop(columns="Total")
+        .iloc[0]
+        .sort_values(ascending=False)
+    )
+
+    top_days = ", ".join(day_counts.head(3).index.tolist())
+
+    return (
+        f"Best performing days: {top_days} "
+        f"({int(day_counts.iloc[0]):,} registrations on the "
+        "strongest day)."
+    )
 
 
 def create_complimentary_category_table(data):
@@ -3008,6 +3302,473 @@ def create_archive_csv_bundle(tables):
     return output.getvalue().encode("utf-8-sig")
 
 
+def _prepare_table_for_sheet(dataframe, fallback_index_name):
+    """
+    Shared cleanup before writing a table into a worksheet: reset
+    any meaningful (non-default) index into its own column, and
+    format Timestamp column labels into readable dates.
+    """
+    export_table = dataframe.copy()
+
+    if not isinstance(export_table.index, pd.RangeIndex):
+        if export_table.index.name is None:
+            export_table.index.name = fallback_index_name
+
+        export_table = export_table.reset_index()
+
+    export_table.columns = [
+        column.strftime("%d-%b-%Y")
+        if isinstance(column, pd.Timestamp)
+        else column
+        for column in export_table.columns
+    ]
+
+    return export_table
+
+
+def write_stacked_tables_to_sheet(workbook, sheet_name, sections):
+    """
+    Create one worksheet containing several titled tables stacked
+    vertically: a bold title row, the table's header and data
+    rows, then a blank separator row before the next table.
+
+    sections is a list of (title, dataframe_or_None) tuples.
+    Empty or missing tables still get their title row (so it is
+    clear the section was considered, not accidentally dropped)
+    followed by a blank row.
+    """
+    worksheet = workbook.create_sheet(title=sheet_name[:31])
+
+    current_row = 1
+
+    for title, table in sections:
+        title_cell = worksheet.cell(
+            row=current_row, column=1, value=title
+        )
+
+        title_cell.font = Font(bold=True, size=12)
+
+        current_row += 1
+
+        if table is None or table.empty:
+            current_row += 1
+            continue
+
+        export_table = _prepare_table_for_sheet(table, title)
+
+        for column_index, column_name in enumerate(
+            export_table.columns, start=1
+        ):
+            header_cell = worksheet.cell(
+                row=current_row,
+                column=column_index,
+                value=column_name,
+            )
+
+            header_cell.font = Font(bold=True)
+
+        current_row += 1
+
+        for _, row in export_table.iterrows():
+            for column_index, value in enumerate(
+                row, start=1
+            ):
+                if isinstance(value, float) and pd.isna(
+                    value
+                ):
+                    value = None
+
+                worksheet.cell(
+                    row=current_row,
+                    column=column_index,
+                    value=value,
+                )
+
+            current_row += 1
+
+        current_row += 1
+
+    for column_cells in worksheet.columns:
+        max_length = max(
+            (
+                len(str(cell.value))
+                for cell in column_cells
+                if cell.value is not None
+            ),
+            default=10,
+        )
+
+        worksheet.column_dimensions[
+            column_cells[0].column_letter
+        ].width = min(max_length + 2, 40)
+
+    return worksheet
+
+
+def write_side_by_side_tables_to_sheet(
+    workbook,
+    sheet_name,
+    title,
+    left_title,
+    left_table,
+    right_title,
+    right_table,
+    start_row=1,
+    existing_worksheet=None,
+):
+    """
+    Write two tables side by side (with a blank column gap)
+    starting at start_row, used for the Registration Timing
+    sheet's AM/PM hour blocks. Returns the worksheet and the next
+    free row below both tables.
+    """
+    worksheet = (
+        existing_worksheet
+        if existing_worksheet is not None
+        else workbook.create_sheet(title=sheet_name[:31])
+    )
+
+    current_row = start_row
+
+    if title:
+        worksheet.cell(
+            row=current_row, column=1, value=title
+        ).font = Font(bold=True, size=12)
+
+        current_row += 1
+
+    header_row = current_row
+
+    worksheet.cell(
+        row=header_row, column=1, value=left_title
+    ).font = Font(bold=True)
+
+    worksheet.cell(
+        row=header_row, column=4, value=right_title
+    ).font = Font(bold=True)
+
+    current_row += 1
+
+    for column_offset, table in (
+        (1, left_table),
+        (4, right_table),
+    ):
+        if table is None or table.empty:
+            continue
+
+        for column_index, column_name in enumerate(
+            table.columns
+        ):
+            worksheet.cell(
+                row=current_row,
+                column=column_offset + column_index,
+                value=column_name,
+            ).font = Font(bold=True)
+
+    table_row = current_row + 1
+
+    max_rows = max(
+        len(left_table) if left_table is not None else 0,
+        len(right_table) if right_table is not None else 0,
+    )
+
+    for row_offset in range(max_rows):
+        for column_offset, table in (
+            (1, left_table),
+            (4, right_table),
+        ):
+            if table is None or row_offset >= len(table):
+                continue
+
+            for column_index, value in enumerate(
+                table.iloc[row_offset]
+            ):
+                worksheet.cell(
+                    row=table_row + row_offset,
+                    column=column_offset + column_index,
+                    value=value,
+                )
+
+    return worksheet, table_row + max_rows + 1
+
+
+def reshape_weekday_table_for_report(weekday_totals_table):
+    """
+    Reshape the single-row weekday totals table (columns Mon..Sun
+    plus Total) into a two-column Day/Count table, so the day
+    labels survive being written into the report — a plain
+    transpose loses them, since only column headers and data are
+    written, not the index.
+    """
+    if weekday_totals_table.empty:
+        return pd.DataFrame()
+
+    row = weekday_totals_table.iloc[0]
+
+    return pd.DataFrame(
+        {
+            "Day": row.index.tolist(),
+            "Count": row.values.tolist(),
+        }
+    )
+
+
+def create_final_report(
+    country_market_table,
+    nationality_market_table,
+    age_gender_table,
+    category_gender_table,
+    age_category_gender_grid,
+    all_registration_data,
+    momentum_period_data,
+    slot_breakdown_tables,
+    corporate_utilisation_final,
+    complimentary_utilisation_final,
+    overall_tracker_cumulative,
+    channel_trackers_cumulative,
+    overall_tracker_daily,
+    channel_trackers_daily_final,
+):
+    """
+    Build the 7-sheet "final report" workbook matching the
+    reference sheets: Demographics & Splits, Registration Timing
+    & Days, Slot Breakdown, Corporate Sales & Utilisation,
+    Complimentary Utilisation, Daily Registration (Cumulative),
+    Daily Registration (Daily).
+    """
+    output = BytesIO()
+
+    workbook = Workbook()
+
+    workbook.remove(workbook.active)
+
+    # --- Sheet 1: Demographics & Splits ---
+    write_stacked_tables_to_sheet(
+        workbook,
+        "Demographics & Splits",
+        [
+            ("SG vs Non-SG (Nationality)", nationality_market_table),
+            ("SG vs Non-SG (Country)", country_market_table),
+            ("Age & Gender Splits", age_gender_table),
+            ("Category & Gender Splits", category_gender_table),
+            (
+                "Age Range x Category x Gender",
+                age_category_gender_grid,
+            ),
+        ],
+    )
+
+    # --- Sheet 2: Registration Timing & Days ---
+    timing_sheet = workbook.create_sheet(
+        title="Registration Timing & Days"[:31]
+    )
+
+    all_weekday = create_weekday_totals_table(
+        all_registration_data
+    )
+
+    all_am, all_pm = create_hourly_am_pm_tables(
+        all_registration_data
+    )
+
+    momentum_weekday = create_weekday_totals_table(
+        momentum_period_data
+    )
+
+    momentum_am, momentum_pm = create_hourly_am_pm_tables(
+        momentum_period_data
+    )
+
+    timing_sheet.cell(
+        row=1,
+        column=1,
+        value=(
+            "Based on all registrations from launch till date"
+        ),
+    ).font = Font(bold=True, size=12)
+
+    _, next_row = write_side_by_side_tables_to_sheet(
+        workbook,
+        "Registration Timing & Days",
+        None,
+        "Weekday Totals",
+        reshape_weekday_table_for_report(all_weekday),
+        "",
+        pd.DataFrame(),
+        start_row=2,
+        existing_worksheet=timing_sheet,
+    )
+
+    _, next_row = write_side_by_side_tables_to_sheet(
+        workbook,
+        "Registration Timing & Days",
+        None,
+        "AM (1:00 am - 12:00 pm)",
+        all_am,
+        "PM (1:00 pm - 12:00 am)",
+        all_pm,
+        start_row=next_row,
+        existing_worksheet=timing_sheet,
+    )
+
+    timing_sheet.cell(
+        row=next_row,
+        column=1,
+        value=build_timing_commentary(all_weekday),
+    ).font = Font(italic=True)
+
+    next_row += 2
+
+    timing_sheet.cell(
+        row=next_row,
+        column=1,
+        value=(
+            "Momentum period — based on all registrations "
+            f"without the {REGISTRATION_OPEN_DATE.strftime('%-d %b')}"
+            f" - {LAUNCH_HYPE_END_DATE.strftime('%-d %b')} launch "
+            "hype window"
+        ),
+    ).font = Font(bold=True, size=12)
+
+    next_row += 1
+
+    _, next_row = write_side_by_side_tables_to_sheet(
+        workbook,
+        "Registration Timing & Days",
+        None,
+        "Weekday Totals",
+        reshape_weekday_table_for_report(momentum_weekday),
+        "",
+        pd.DataFrame(),
+        start_row=next_row,
+        existing_worksheet=timing_sheet,
+    )
+
+    _, next_row = write_side_by_side_tables_to_sheet(
+        workbook,
+        "Registration Timing & Days",
+        None,
+        "AM (1:00 am - 12:00 pm)",
+        momentum_am,
+        "PM (1:00 pm - 12:00 am)",
+        momentum_pm,
+        start_row=next_row,
+        existing_worksheet=timing_sheet,
+    )
+
+    timing_sheet.cell(
+        row=next_row,
+        column=1,
+        value=build_timing_commentary(momentum_weekday),
+    ).font = Font(italic=True)
+
+    for column_cells in timing_sheet.columns:
+        max_length = max(
+            (
+                len(str(cell.value))
+                for cell in column_cells
+                if cell.value is not None
+            ),
+            default=10,
+        )
+
+        timing_sheet.column_dimensions[
+            column_cells[0].column_letter
+        ].width = min(max_length + 2, 45)
+
+    # --- Sheet 3: Slot Breakdown ---
+    write_stacked_tables_to_sheet(
+        workbook,
+        "Slot Breakdown",
+        [
+            (group_name, table)
+            for group_name, table in (
+                slot_breakdown_tables.items()
+            )
+        ],
+    )
+
+    # --- Sheet 4: Corporate Sales & Utilisation ---
+    write_stacked_tables_to_sheet(
+        workbook,
+        "Corporate Sales & Utilisation",
+        [
+            (
+                "Corporate Sales & Utilisation",
+                corporate_utilisation_final,
+            ),
+        ],
+    )
+
+    # --- Sheet 5: Complimentary Utilisation ---
+    write_stacked_tables_to_sheet(
+        workbook,
+        "Complimentary Utilisation",
+        [
+            (
+                "Complimentary Utilisation",
+                complimentary_utilisation_final,
+            ),
+        ],
+    )
+
+    # --- Sheet 6: Daily Registration (Cumulative) ---
+    write_stacked_tables_to_sheet(
+        workbook,
+        "Daily Registration (Cumulative)",
+        [
+            ("Overall", overall_tracker_cumulative),
+            (
+                "Retail (excl. corporate & complimentary)",
+                channel_trackers_cumulative.get(
+                    "Retail (excl. corporate & complimentary)"
+                ),
+            ),
+            (
+                "Corporate",
+                channel_trackers_cumulative.get("Corporate"),
+            ),
+            (
+                "Complimentary",
+                channel_trackers_cumulative.get(
+                    "Complimentary"
+                ),
+            ),
+        ],
+    )
+
+    # --- Sheet 7: Daily Registration (Daily) ---
+    write_stacked_tables_to_sheet(
+        workbook,
+        "Daily Registration (Daily)",
+        [
+            ("Overall", overall_tracker_daily),
+            (
+                "Retail (excl. corporate & complimentary)",
+                channel_trackers_daily_final.get(
+                    "Retail (excl. corporate & complimentary)"
+                ),
+            ),
+            (
+                "Corporate",
+                channel_trackers_daily_final.get("Corporate"),
+            ),
+            (
+                "Complimentary",
+                channel_trackers_daily_final.get(
+                    "Complimentary"
+                ),
+            ),
+        ],
+    )
+
+    workbook.save(output)
+
+    output.seek(0)
+
+    return output.getvalue()
+
+
 def create_excel_report(
     original_data,
     filtered_data,
@@ -3850,6 +4611,61 @@ archive_csv_bytes = create_archive_csv_bundle(
 
 original_filename = Path(uploaded_file.name).stem
 
+momentum_period_df = filtered_df[
+    filtered_df["Registration Date Only"].notna()
+    & ~filtered_df["Registration Date Only"].between(
+        REGISTRATION_OPEN_DATE, LAUNCH_HYPE_END_DATE
+    )
+]
+
+slot_breakdown_tables = create_slot_breakdown_tables(
+    filtered_df,
+    group_corporate_column=group_corporate_column,
+    category_column=category_column,
+)
+
+corporate_utilisation_final = (
+    consolidate_categories_for_final_report(
+        corporate_category_counts
+    )
+)
+
+complimentary_utilisation_final = (
+    consolidate_categories_for_final_report(
+        complimentary_category_counts
+    )
+)
+
+overall_tracker_daily = create_daily_category_pivot(
+    filtered_df
+)
+
+if not overall_tracker_daily.empty:
+    overall_tracker_daily = overall_tracker_daily.copy()
+
+    overall_tracker_daily.loc["Daily Registrations"] = (
+        overall_tracker_daily.sum(axis=0)
+    )
+
+final_report_bytes = create_final_report(
+    country_market_table=country_market_table,
+    nationality_market_table=nationality_market_table,
+    age_gender_table=age_gender_table,
+    category_gender_table=category_gender_table,
+    age_category_gender_grid=age_category_gender_grid,
+    all_registration_data=filtered_df,
+    momentum_period_data=momentum_period_df,
+    slot_breakdown_tables=slot_breakdown_tables,
+    corporate_utilisation_final=corporate_utilisation_final,
+    complimentary_utilisation_final=(
+        complimentary_utilisation_final
+    ),
+    overall_tracker_cumulative=tracker_table,
+    channel_trackers_cumulative=channel_trackers,
+    overall_tracker_daily=overall_tracker_daily,
+    channel_trackers_daily_final=channel_trackers_daily,
+)
+
 
 # =========================================================
 # DASHBOARD TABS
@@ -3900,9 +4716,11 @@ with snapshot_tab:
         "management reviews weekly, in one place."
     )
 
-    snapshot_download_col_1, snapshot_download_col_2 = (
-        st.columns(2)
-    )
+    (
+        snapshot_download_col_1,
+        snapshot_download_col_2,
+        snapshot_download_col_3,
+    ) = st.columns(3)
 
     with snapshot_download_col_1:
         st.download_button(
@@ -3931,13 +4749,34 @@ with snapshot_tab:
             key="snapshot_download_csv",
         )
 
+    with snapshot_download_col_3:
+        st.download_button(
+            label="Download Final Report (Excel)",
+            data=final_report_bytes,
+            file_name=(
+                f"{original_filename}_final_report.xlsx"
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+            key="snapshot_download_final",
+        )
+
     st.caption(
-        "Both buttons bundle every table across the Executive "
-        "Snapshot, Executive Overview and Registration Tracker "
-        "into one file — the Excel version keeps each table on "
-        "its own sheet; the CSV version stacks them one after "
-        "another with a header row naming each table, for a "
-        "plain-text archive baseline."
+        "Full Report and All Tables bundle every table across "
+        "the Executive Snapshot, Executive Overview and "
+        "Registration Tracker into one file (Excel keeps each "
+        "table on its own sheet; CSV stacks them with a header "
+        "row naming each table). Final Report is the seven-sheet "
+        "management-format workbook: Demographics & Splits, "
+        "Registration Timing & Days, Slot Breakdown, Corporate "
+        "Sales & Utilisation, Complimentary Utilisation, and "
+        "Daily Registration in both Cumulative and Daily views. "
+        "Slots/Remaining columns in Slot Breakdown are left "
+        "blank for manual entry, since those are planning "
+        "targets tracked outside this system."
     )
 
     if filtered_df.empty:
@@ -6449,7 +7288,9 @@ with tracker_tab:
 
     st.markdown("#### Download Report")
 
-    download_col_1, download_col_2 = st.columns(2)
+    download_col_1, download_col_2, download_col_3 = (
+        st.columns(3)
+    )
 
     with download_col_1:
         st.download_button(
@@ -6476,4 +7317,19 @@ with tracker_tab:
             mime="text/csv",
             use_container_width=True,
             key="tracker_download_csv",
+        )
+
+    with download_col_3:
+        st.download_button(
+            label="Download Final Report (Excel)",
+            data=final_report_bytes,
+            file_name=(
+                f"{original_filename}_final_report.xlsx"
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            use_container_width=True,
+            key="tracker_download_final",
         )
