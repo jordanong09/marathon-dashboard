@@ -201,6 +201,12 @@ COLUMN_ALIASES = {
     "addon_runflex": [
         "runflex",
     ],
+    "promo_code": [
+        "promo code - code",
+        "promo code",
+        "promocode",
+        "coupon code",
+    ],
 }
 
 # Friendly labels for the add-on columns, used throughout the
@@ -265,6 +271,24 @@ FINAL_REPORT_CATEGORY_MAP = {
     ],
     "Kids (600)": ["Kids Dash Non-Competitive 600m"],
 }
+
+# =========================================================
+# PROMO CAMPAIGN AUDIT
+# =========================================================
+# Bundled promo-code allowlists live in this folder, one file per
+# campaign (CSV or XLSX, any column with a code-like name — see
+# COLUMN_ALIASES["promo_code"]). Drop a new file in here for a
+# future campaign; no code changes needed. The filename (minus
+# extension) becomes the campaign's display name.
+PROMO_LISTS_FOLDER = "promo_lists"
+
+# The nationality breakdown singles out any country worth tracking
+# by name (e.g. Malaysia, for the KL Half cross-promotion) rather
+# than collapsing everything non-Singapore into "International".
+# Add more entries here for future campaigns targeting other
+# specific countries; anything not listed falls into "Other
+# International".
+PROMO_AUDIT_NAMED_COUNTRIES = ["Malaysia"]
 
 # Targets are defined per "target group". The two Kids Dash 1.6KM
 # categories share one combined target of 1,500 (per management
@@ -2201,6 +2225,83 @@ def consolidate_categories_for_final_report(counts_table):
     return result
 
 
+def create_weekly_summary_table(data):
+    """
+    Registrations grouped into 7-day weeks starting from the
+    campaign's first date, with a Week-over-Week change column —
+    both absolute and percentage, so a jump from a tiny base isn't
+    read the same as a jump from a large one. More informative
+    than a single flat WoW figure: every week gets its own row,
+    not just the boundary days.
+    """
+    valid = data[data["Registration Date Only"].notna()]
+
+    if valid.empty:
+        return pd.DataFrame()
+
+    campaign_start = valid["Registration Date Only"].min()
+
+    week_number = (
+        (valid["Registration Date Only"] - campaign_start).dt.days
+        // 7
+    ) + 1
+
+    weekly_counts = (
+        valid.groupby(week_number)
+        .size()
+        .sort_index()
+    )
+
+    week_starts = [
+        campaign_start + pd.Timedelta(days=7 * (week - 1))
+        for week in weekly_counts.index
+    ]
+
+    week_ends = [
+        start + pd.Timedelta(days=6) for start in week_starts
+    ]
+
+    table = pd.DataFrame(
+        {
+            "Week": [
+                f"Week {week}"
+                for week in weekly_counts.index
+            ],
+            "Week Start": [
+                start.strftime("%d %b %Y")
+                for start in week_starts
+            ],
+            "Week End": [
+                end.strftime("%d %b %Y") for end in week_ends
+            ],
+            "Registrations": weekly_counts.values,
+        }
+    )
+
+    previous_week_counts = (
+        weekly_counts.shift(1)
+    )
+
+    wow_change = (
+        weekly_counts - previous_week_counts
+    )
+
+    wow_change_percent = (
+        wow_change / previous_week_counts
+    )
+
+    table["WoW Change"] = wow_change.values
+
+    table["WoW Change %"] = [
+        f"{value * 100:+.0f}%" if pd.notna(value) else "—"
+        for value in wow_change_percent.values
+    ]
+
+    table.loc[table["WoW Change"].isna(), "WoW Change"] = None
+
+    return table
+
+
 def create_weekday_totals_table(data):
     """
     Single-row weekday totals (Monday through Sunday, plus an
@@ -2313,6 +2414,217 @@ def build_timing_commentary(weekday_table):
         f"Best performing days: {top_days} "
         f"({int(day_counts.iloc[0]):,} registrations on the "
         "strongest day)."
+    )
+
+
+def load_bundled_promo_lists():
+    """
+    Scan PROMO_LISTS_FOLDER for campaign promo-code allowlists.
+    Each file (CSV or XLSX) becomes one campaign, named after its
+    filename. Returns a dict of {campaign_label: set_of_codes}.
+    Missing folder or unreadable files are skipped quietly — this
+    is a convenience feature, not something that should crash the
+    dashboard if the folder is absent.
+    """
+    campaigns = {}
+
+    folder = Path(PROMO_LISTS_FOLDER)
+
+    if not folder.exists():
+        return campaigns
+
+    for file_path in sorted(folder.iterdir()):
+        if file_path.suffix.lower() not in (".csv", ".xlsx"):
+            continue
+
+        try:
+            if file_path.suffix.lower() == ".csv":
+                list_data = pd.read_csv(
+                    file_path, encoding="utf-8-sig"
+                )
+            else:
+                list_data = pd.read_excel(file_path)
+        except Exception:
+            continue
+
+        code_column = detect_column(
+            list_data.columns,
+            COLUMN_ALIASES["promo_code"],
+        )
+
+        if code_column is None:
+            continue
+
+        codes = set(
+            list_data[code_column]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+
+        codes.discard("")
+
+        if codes:
+            campaigns[file_path.stem] = codes
+
+    return campaigns
+
+
+def classify_named_market(country):
+    """
+    Three-or-more-way market classification for promo audits:
+    Singapore, any specifically named country (see
+    PROMO_AUDIT_NAMED_COUNTRIES — e.g. Malaysia for the KL Half
+    cross-promotion), Other International, or Unknown.
+    """
+    if country == "Singapore":
+        return "Singapore"
+
+    if country == "Unknown":
+        return "Unknown"
+
+    if country in PROMO_AUDIT_NAMED_COUNTRIES:
+        return country
+
+    return "Other International"
+
+
+def create_promo_audit_summary(
+    data, promo_code_column, valid_codes
+):
+    """
+    Match registrations against a promo-code allowlist and return
+    (matched_rows, summary_metrics, category_breakdown,
+    nationality_breakdown, addon_attach_summary).
+
+    Matching is by exact promo code, not price — a participant
+    who also bought an add-on still shows the same base $38 promo
+    price plus the add-on cost, which would make price-based
+    matching unreliable; matching on the code itself sidesteps
+    that entirely.
+    """
+    codes_used = (
+        data[promo_code_column]
+        .astype(str)
+        .str.strip()
+    )
+
+    matched_rows = data[codes_used.isin(valid_codes)]
+
+    total_valid_codes = len(valid_codes)
+    total_matched = len(matched_rows)
+
+    summary_metrics = {
+        "total_codes": total_valid_codes,
+        "total_matched": total_matched,
+        "utilisation_rate": (
+            total_matched / total_valid_codes
+            if total_valid_codes
+            else 0
+        ),
+    }
+
+    mapped_matches = matched_rows[
+        matched_rows["Grouped Category"].ne("Unmapped")
+    ]
+
+    category_counts = (
+        mapped_matches["Grouped Category"]
+        .value_counts()
+        .reindex(CATEGORY_ORDER, fill_value=0)
+    )
+
+    category_counts = category_counts[
+        category_counts > 0
+    ].sort_values(ascending=False)
+
+    category_breakdown = pd.DataFrame(
+        {
+            "Registrations": category_counts,
+            "Share of Promo Users": (
+                category_counts / total_matched
+                if total_matched
+                else category_counts
+            ),
+        }
+    )
+
+    category_breakdown.index.name = "Category"
+
+    # Nationality is the semantically correct field for "which
+    # country are these participants actually from" — it falls
+    # back to Country only when Nationality was not provided.
+    nationality_source_column = (
+        "Nationality Clean"
+        if "Nationality Clean" in matched_rows.columns
+        and matched_rows["Nationality Clean"].notna().any()
+        else "Country Clean"
+    )
+
+    nationality_labels = matched_rows[
+        nationality_source_column
+    ].apply(classify_named_market)
+
+    nationality_counts = nationality_labels.value_counts()
+
+    named_order = (
+        ["Singapore"]
+        + PROMO_AUDIT_NAMED_COUNTRIES
+        + ["Other International", "Unknown"]
+    )
+
+    nationality_counts = nationality_counts.reindex(
+        named_order, fill_value=0
+    )
+
+    nationality_counts = nationality_counts[
+        nationality_counts > 0
+    ]
+
+    nationality_breakdown = pd.DataFrame(
+        {
+            "Registrations": nationality_counts,
+            "Share of Promo Users": (
+                nationality_counts / total_matched
+                if total_matched
+                else nationality_counts
+            ),
+        }
+    )
+
+    nationality_breakdown.index.name = (
+        "Nationality"
+        if nationality_source_column == "Nationality Clean"
+        else "Country"
+    )
+
+    addon_flag_columns = [
+        column
+        for column in matched_rows.columns
+        if column.startswith("Addon ")
+    ]
+
+    if addon_flag_columns and total_matched:
+        any_addon = (
+            matched_rows[addon_flag_columns].sum(axis=1) > 0
+        )
+
+        addon_attach_summary = {
+            "with_addon": int(any_addon.sum()),
+            "without_addon": int((~any_addon).sum()),
+            "attach_rate": float(
+                any_addon.sum() / total_matched
+            ),
+        }
+    else:
+        addon_attach_summary = None
+
+    return (
+        matched_rows,
+        summary_metrics,
+        category_breakdown,
+        nationality_breakdown,
+        addon_attach_summary,
     )
 
 
@@ -3326,6 +3638,87 @@ def _prepare_table_for_sheet(dataframe, fallback_index_name):
     return export_table
 
 
+_INTEGER_TEXT_PATTERN = re.compile(r"^[+-]?\d{1,3}(,\d{3})*$")
+_DECIMAL_TEXT_PATTERN = re.compile(r"^[+-]?\d+\.\d+$")
+_PERCENT_TEXT_PATTERN = re.compile(r"^[+-]?\d+(\.\d+)?%$")
+
+
+def convert_numeric_text_to_real_numbers(workbook):
+    """
+    Scan every cell in every worksheet of the given workbook and,
+    where the value is text that clearly represents a plain
+    number, a decimal, or a percentage (e.g. "16,767", "85%",
+    "+42"), replace it with the true numeric value and apply the
+    matching Excel number format. This is what makes cells behave
+    as real numbers — SUM() works, they right-align, and copying
+    them into another workbook pastes values instead of text.
+
+    Genuine text is left untouched, including combined cells like
+    "1,407 (32%)" that mix a count and a share in one cell — those
+    cannot become a single number without losing information.
+    Cells that are already numeric get a matching number format
+    applied too, for consistent thousands separators throughout.
+    """
+    for worksheet in workbook.worksheets:
+        for row in worksheet.iter_rows():
+            for cell in row:
+                value = cell.value
+
+                if isinstance(value, bool):
+                    continue
+
+                if isinstance(value, (int, float)):
+                    if cell.number_format in (
+                        None,
+                        "General",
+                    ):
+                        is_whole_number = (
+                            isinstance(value, int)
+                            or float(value).is_integer()
+                        )
+
+                        cell.number_format = (
+                            "#,##0"
+                            if is_whole_number
+                            else "#,##0.00"
+                        )
+
+                    continue
+
+                if not isinstance(value, str):
+                    continue
+
+                text = value.strip()
+
+                if not text:
+                    continue
+
+                if _PERCENT_TEXT_PATTERN.match(text):
+                    cell.value = float(text[:-1]) / 100
+
+                    cell.number_format = (
+                        "0.0%" if "." in text else "0%"
+                    )
+
+                    continue
+
+                if _INTEGER_TEXT_PATTERN.match(text):
+                    cell.value = int(
+                        text.replace(",", "")
+                    )
+
+                    cell.number_format = "#,##0"
+
+                    continue
+
+                if _DECIMAL_TEXT_PATTERN.match(text):
+                    cell.value = float(text)
+
+                    cell.number_format = "#,##0.00"
+
+    return workbook
+
+
 def write_stacked_tables_to_sheet(workbook, sheet_name, sections):
     """
     Create one worksheet containing several titled tables stacked
@@ -3528,6 +3921,7 @@ def create_final_report(
     channel_trackers_cumulative,
     overall_tracker_daily,
     channel_trackers_daily_final,
+    weekly_summary_table,
 ):
     """
     Build the 7-sheet "final report" workbook matching the
@@ -3624,8 +4018,8 @@ def create_final_report(
         column=1,
         value=(
             "Momentum period — based on all registrations "
-            f"without the {REGISTRATION_OPEN_DATE.strftime('%-d %b')}"
-            f" - {LAUNCH_HYPE_END_DATE.strftime('%-d %b')} launch "
+            f"without the {REGISTRATION_OPEN_DATE.strftime('%d %b')}"
+            f" - {LAUNCH_HYPE_END_DATE.strftime('%d %b')} launch "
             "hype window"
         ),
     ).font = Font(bold=True, size=12)
@@ -3718,6 +4112,7 @@ def create_final_report(
         "Daily Registration (Cumulative)",
         [
             ("Overall", overall_tracker_cumulative),
+            ("Weekly Summary", weekly_summary_table),
             (
                 "Retail (excl. corporate & complimentary)",
                 channel_trackers_cumulative.get(
@@ -3743,6 +4138,7 @@ def create_final_report(
         "Daily Registration (Daily)",
         [
             ("Overall", overall_tracker_daily),
+            ("Weekly Summary", weekly_summary_table),
             (
                 "Retail (excl. corporate & complimentary)",
                 channel_trackers_daily_final.get(
@@ -3761,6 +4157,8 @@ def create_final_report(
             ),
         ],
     )
+
+    convert_numeric_text_to_real_numbers(workbook)
 
     workbook.save(output)
 
@@ -4056,6 +4454,8 @@ def create_excel_report(
         for cell in category_pace_sheet["F"][1:]:
             cell.number_format = "0.0%"
 
+        convert_numeric_text_to_real_numbers(workbook)
+
     output.seek(0)
 
     return output
@@ -4183,6 +4583,11 @@ detected_addon_runflex = detect_column(
     COLUMN_ALIASES["addon_runflex"],
 )
 
+detected_promo_code = detect_column(
+    source_df.columns,
+    COLUMN_ALIASES["promo_code"],
+)
+
 with st.expander(
     "Source-column configuration",
     expanded=False,
@@ -4277,6 +4682,17 @@ with st.expander(
             detected_addon_runflex,
             help_text=(
                 "Optional. A 0/1 purchase-flag column."
+            ),
+        )
+
+        promo_code_column = optional_column_selector(
+            "Promo code column",
+            source_df.columns,
+            detected_promo_code,
+            help_text=(
+                "Optional. Enables the Promo Campaign Audit tab, "
+                "matching this column's values against an "
+                "uploaded promo-code allowlist."
             ),
         )
 
@@ -4647,6 +5063,8 @@ if not overall_tracker_daily.empty:
         overall_tracker_daily.sum(axis=0)
     )
 
+weekly_summary_table = create_weekly_summary_table(filtered_df)
+
 final_report_bytes = create_final_report(
     country_market_table=country_market_table,
     nationality_market_table=nationality_market_table,
@@ -4664,7 +5082,10 @@ final_report_bytes = create_final_report(
     channel_trackers_cumulative=channel_trackers,
     overall_tracker_daily=overall_tracker_daily,
     channel_trackers_daily_final=channel_trackers_daily,
+    weekly_summary_table=weekly_summary_table,
 )
+
+bundled_promo_campaigns = load_bundled_promo_lists()
 
 
 # =========================================================
@@ -4679,6 +5100,7 @@ final_report_bytes = create_final_report(
     demographics_tab,
     country_tab,
     corporate_tab,
+    promo_audit_tab,
     timing_tab,
     quality_tab,
     tracker_tab,
@@ -4691,6 +5113,7 @@ final_report_bytes = create_final_report(
         "Participant Demographics",
         "Country Analysis",
         "Corporate, Comps & Add-Ons",
+        "Promo Campaign Audit",
         "Registration Timing",
         "Data Quality",
         "Registration Tracker",
@@ -6839,6 +7262,290 @@ with corporate_tab:
 
 
 # =========================================================
+# TAB 6.5: PROMO CAMPAIGN AUDIT
+# =========================================================
+
+with promo_audit_tab:
+    st.subheader("Promo Campaign Audit")
+
+    st.caption(
+        "Match registrations against an uploaded promo-code "
+        "allowlist to measure a specific campaign — for example, "
+        "the KL Half cross-promotion offering KL Marathon "
+        "finishers any SGIM category for $38. Matching is by "
+        "exact promo code, not price, so an add-on purchase on "
+        "top of the promo price never causes a false negative."
+    )
+
+    if promo_code_column is None:
+        st.info(
+            "No promo code column was found in this file. "
+            "Select it manually under Source-column "
+            "configuration if it exists under a different name."
+        )
+    else:
+        campaign_options = list(bundled_promo_campaigns.keys()) + [
+            "Upload a different list..."
+        ]
+
+        selected_campaign = st.selectbox(
+            "Campaign",
+            options=campaign_options,
+            help=(
+                "Bundled lists come from the promo_lists folder "
+                "next to app.py — add a new CSV or XLSX file "
+                "there for a future campaign, no code changes "
+                "needed."
+            ),
+        )
+
+        if selected_campaign == "Upload a different list...":
+            adhoc_file = st.file_uploader(
+                "Upload a promo-code allowlist (CSV or XLSX)",
+                type=["csv", "xlsx"],
+                key="promo_audit_adhoc_upload",
+            )
+
+            valid_codes = set()
+
+            if adhoc_file is not None:
+                try:
+                    if adhoc_file.name.lower().endswith(
+                        ".csv"
+                    ):
+                        adhoc_list = pd.read_csv(
+                            adhoc_file, encoding="utf-8-sig"
+                        )
+                    else:
+                        adhoc_list = pd.read_excel(adhoc_file)
+
+                    adhoc_code_column = detect_column(
+                        adhoc_list.columns,
+                        COLUMN_ALIASES["promo_code"],
+                    )
+
+                    if adhoc_code_column is None:
+                        st.warning(
+                            "Could not find a promo code column "
+                            "in the uploaded file."
+                        )
+                    else:
+                        valid_codes = set(
+                            adhoc_list[adhoc_code_column]
+                            .dropna()
+                            .astype(str)
+                            .str.strip()
+                        )
+
+                        valid_codes.discard("")
+                except Exception as error:
+                    st.warning(
+                        f"Could not read that file: {error}"
+                    )
+        else:
+            valid_codes = bundled_promo_campaigns.get(
+                selected_campaign, set()
+            )
+
+        if not valid_codes:
+            st.info(
+                "No promo codes loaded yet — select a bundled "
+                "campaign or upload an allowlist above."
+            )
+        else:
+            (
+                matched_rows,
+                promo_summary,
+                promo_category_breakdown,
+                promo_nationality_breakdown,
+                promo_addon_summary,
+            ) = create_promo_audit_summary(
+                filtered_df, promo_code_column, valid_codes
+            )
+
+            promo_metric_1, promo_metric_2, promo_metric_3 = (
+                st.columns(3)
+            )
+
+            promo_metric_1.metric(
+                "Codes Issued",
+                f"{promo_summary['total_codes']:,}",
+            )
+
+            promo_metric_2.metric(
+                "Codes Redeemed",
+                f"{promo_summary['total_matched']:,}",
+            )
+
+            promo_metric_3.metric(
+                "Utilisation Rate",
+                f"{promo_summary['utilisation_rate'] * 100:.1f}%",
+            )
+
+            if promo_summary["total_matched"] == 0:
+                st.info(
+                    "No registrations in the current selection "
+                    "matched this campaign's promo codes."
+                )
+            else:
+                st.markdown("#### Which Category Signed Up Most")
+
+                category_chart_data = (
+                    promo_category_breakdown.reset_index()
+                )
+
+                category_figure = px.bar(
+                    category_chart_data,
+                    x="Registrations",
+                    y="Category",
+                    orientation="h",
+                    text="Registrations",
+                )
+
+                top_category_value = category_chart_data[
+                    "Registrations"
+                ].max()
+
+                category_figure.update_traces(
+                    marker_color=[
+                        ACCENT_COLOR
+                        if value == top_category_value
+                        else NEUTRAL_COLOR
+                        for value in category_chart_data[
+                            "Registrations"
+                        ]
+                    ]
+                )
+
+                category_figure.update_layout(
+                    xaxis_title="Registrations via this promo",
+                    yaxis_title="",
+                    yaxis={
+                        "categoryorder": "total ascending",
+                    },
+                )
+
+                st.plotly_chart(
+                    category_figure,
+                    use_container_width=True,
+                )
+
+                display_category_breakdown = (
+                    promo_category_breakdown.copy()
+                )
+
+                display_category_breakdown[
+                    "Share of Promo Users"
+                ] = display_category_breakdown[
+                    "Share of Promo Users"
+                ].map(lambda value: f"{value * 100:.1f}%")
+
+                st.dataframe(
+                    display_category_breakdown,
+                    use_container_width=True,
+                )
+
+                st.markdown("#### Who Actually Used It")
+
+                nationality_label = (
+                    promo_nationality_breakdown.index.name
+                )
+
+                nationality_chart_data = (
+                    promo_nationality_breakdown.reset_index()
+                )
+
+                nationality_figure = px.pie(
+                    nationality_chart_data,
+                    names=nationality_label,
+                    values="Registrations",
+                    hole=0.45,
+                )
+
+                nationality_figure.update_traces(
+                    textinfo="label+percent",
+                )
+
+                st.plotly_chart(
+                    nationality_figure,
+                    use_container_width=True,
+                )
+
+                display_nationality_breakdown = (
+                    promo_nationality_breakdown.copy()
+                )
+
+                display_nationality_breakdown[
+                    "Share of Promo Users"
+                ] = display_nationality_breakdown[
+                    "Share of Promo Users"
+                ].map(lambda value: f"{value * 100:.1f}%")
+
+                st.dataframe(
+                    display_nationality_breakdown,
+                    use_container_width=True,
+                )
+
+                malaysia_share = (
+                    promo_nationality_breakdown[
+                        "Registrations"
+                    ].get(
+                        PROMO_AUDIT_NAMED_COUNTRIES[0], 0
+                    )
+                    / promo_summary["total_matched"]
+                    * 100
+                )
+
+                singapore_share = (
+                    promo_nationality_breakdown[
+                        "Registrations"
+                    ].get("Singapore", 0)
+                    / promo_summary["total_matched"]
+                    * 100
+                )
+
+                st.caption(
+                    f"{malaysia_share:.0f}% of promo users are "
+                    f"{PROMO_AUDIT_NAMED_COUNTRIES[0]} by "
+                    f"{nationality_label.lower()} — the intended "
+                    "KL Marathon conversion. "
+                    f"{singapore_share:.0f}% are Singaporean, "
+                    "which would mean locals leveraging the "
+                    "offer rather than genuine overseas "
+                    "conversion, if that share is meaningful."
+                )
+
+                if promo_addon_summary is not None:
+                    st.markdown("#### Add-On Attach Among Promo Users")
+
+                    addon_metric_1, addon_metric_2 = st.columns(2)
+
+                    addon_metric_1.metric(
+                        "Bought an Add-On",
+                        f"{promo_addon_summary['with_addon']:,}",
+                        delta=(
+                            f"{promo_addon_summary['attach_rate'] * 100:.0f}% "
+                            "attach rate"
+                        ),
+                        delta_color="off",
+                    )
+
+                    addon_metric_2.metric(
+                        "No Add-On",
+                        f"{promo_addon_summary['without_addon']:,}",
+                    )
+
+                    st.caption(
+                        "Computed directly from the add-on "
+                        "purchase flags, not from price — so a "
+                        "promo user's Participant Sub Total "
+                        "being above $38 never needs to be "
+                        "interpreted; the add-on columns say so "
+                        "directly."
+                    )
+
+
+# =========================================================
 # TAB 7: REGISTRATION TIMING
 # =========================================================
 
@@ -7236,6 +7943,59 @@ with tracker_tab:
         st.dataframe(
             formatted_tracker,
             use_container_width=True,
+        )
+
+    st.markdown("#### Weekly Summary")
+
+    st.caption(
+        "Every week's total, with the week-over-week change — "
+        "both the absolute number and the percentage, since a "
+        "jump from a small base reads very differently from the "
+        "same jump on a large one."
+    )
+
+    if weekly_summary_table.empty:
+        st.info(
+            "No weekly data is available for the selected "
+            "filters."
+        )
+    else:
+        weekly_figure = go.Figure()
+
+        weekly_figure.add_trace(
+            go.Bar(
+                x=weekly_summary_table["Week"],
+                y=weekly_summary_table["Registrations"],
+                marker_color=NEUTRAL_COLOR,
+                name="Registrations",
+            )
+        )
+
+        weekly_figure.update_layout(
+            xaxis_title="",
+            yaxis_title="Registrations",
+            showlegend=False,
+        )
+
+        st.plotly_chart(
+            weekly_figure,
+            use_container_width=True,
+        )
+
+        weekly_display = weekly_summary_table.copy()
+
+        weekly_display["WoW Change"] = weekly_display[
+            "WoW Change"
+        ].map(
+            lambda value: (
+                f"{int(value):+,}" if pd.notna(value) else "—"
+            )
+        )
+
+        st.dataframe(
+            weekly_display,
+            use_container_width=True,
+            hide_index=True,
         )
 
     st.markdown("#### By Channel: Retail, Corporate & Complimentary")
