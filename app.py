@@ -1,4 +1,9 @@
+from datetime import timedelta
+import csv
+from corporate_sales import render_corporate_sales
+from slot_planning import render_slot_planning
 import base64
+from admin_dashboard import style_dashboard, render_admin, workspace_navigation, render_chart
 import re
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -32,6 +37,8 @@ st.set_page_config(
 # bundle), the dashboard falls back to a plain text title rather
 # than breaking.
 
+style_dashboard()
+
 LOGO_FILENAME = "event_logo.png"
 
 # The lion red from the event mark, used for the banner rule.
@@ -54,40 +61,13 @@ def render_event_banner():
     ).decode()
 
     st.markdown(
-        f"""
-        <div style="
-            display: flex;
-            align-items: center;
-            gap: 1.25rem;
-            padding: 0.4rem 0 0.9rem 0;
-            border-bottom: 3px solid {BRAND_RED};
-            margin-bottom: 1.1rem;
-            flex-wrap: wrap;
-        ">
-            <img src="data:image/png;base64,{encoded_logo}"
-                 alt="BYD Singapore International Marathon"
-                 style="height: 74px;" />
-            <div>
-                <div style="
-                    font-size: 1.55rem;
-                    font-weight: 700;
-                    line-height: 1.2;
-                    color: #31333F;
-                ">
-                    Registration Intelligence Dashboard
-                </div>
-                <div style="
-                    font-size: 0.9rem;
-                    color: #6B7280;
-                    margin-top: 0.15rem;
-                ">
-                    Race weekend 4&ndash;6 Dec 2026 &middot;
-                    Registration closes 30 Sep 2026 &middot;
-                    Internal management report
-                </div>
-            </div>
-        </div>
-        """,
+        f"""<div class="event-header">
+        <img src="data:image/png;base64,{encoded_logo}" alt="BYD Singapore International Marathon" />
+        <div class="event-header-copy"><div class="event-eyebrow">SGIM 2026 · REGISTRATION OPERATIONS</div>
+        <div class="event-heading">Registration intelligence</div>
+        <div class="event-subtitle">Registration intelligence &amp; allocation management</div>
+        <div class="event-dates">Race weekend <strong>4–6 Dec 2026</strong><span>Registration closes <strong>30 Sep 2026</strong></span></div>
+        </div></div>""",
         unsafe_allow_html=True,
     )
 
@@ -323,6 +303,11 @@ CATEGORY_TARGETS = {
     "Kids Dash 1.6KM (combined)": 1500,
     "Kids Dash 600m": 2500,
 }
+
+if "allocation_plan" in st.session_state:
+    for _, saved_plan in st.session_state.allocation_plan.iterrows():
+        if saved_plan["Category"] in CATEGORY_TARGETS:
+            CATEGORY_TARGETS[saved_plan["Category"]] = int(saved_plan["Target"])
 
 # Campaign milestones are drawn as dotted vertical markers on every
 # time-series chart so registration spikes explain themselves.
@@ -628,6 +613,7 @@ def assign_age_group(age):
 # FILE READING
 # =========================================================
 
+@st.cache_data(show_spinner=False, max_entries=3)
 def read_csv_file(uploaded_file):
     """
     Read an uploaded CSV using common encodings and delimiter detection.
@@ -648,8 +634,8 @@ def read_csv_file(uploaded_file):
             dataframe = pd.read_csv(
                 uploaded_file,
                 encoding=encoding,
-                sep=None,
-                engine="python"
+                sep=csv.Sniffer().sniff(uploaded_file.getvalue()[:8192].decode(encoding), delimiters=",;\t|").delimiter,
+                engine="c"
             )
 
             dataframe.columns = [
@@ -732,6 +718,7 @@ def optional_column_selector(
 # DATA PREPARATION
 # =========================================================
 
+@st.cache_data(show_spinner=False, max_entries=3)
 def prepare_registration_data(
     dataframe,
     registration_date_column,
@@ -2428,7 +2415,7 @@ def load_bundled_promo_lists():
     """
     campaigns = {}
 
-    folder = Path(PROMO_LISTS_FOLDER)
+    folder = Path(__file__).parent / PROMO_LISTS_FOLDER
 
     if not folder.exists():
         return campaigns
@@ -2517,8 +2504,9 @@ def create_promo_audit_summary(
     summary_metrics = {
         "total_codes": total_valid_codes,
         "total_matched": total_matched,
+        "unique_redeemed": matched_rows[promo_code_column].astype(str).str.strip().nunique(),
         "utilisation_rate": (
-            total_matched / total_valid_codes
+            matched_rows[promo_code_column].astype(str).str.strip().nunique() / total_valid_codes
             if total_valid_codes
             else 0
         ),
@@ -3568,6 +3556,7 @@ def format_tracker_worksheet(worksheet):
 # EXCEL EXPORT
 # =========================================================
 
+@st.cache_data(show_spinner=False, max_entries=3)
 def create_archive_csv_bundle(tables):
     """
     Stack multiple tables into a single CSV for archiving: each
@@ -3906,6 +3895,7 @@ def reshape_weekday_table_for_report(weekday_totals_table):
     )
 
 
+@st.cache_data(show_spinner=False, max_entries=3)
 def create_final_report(
     country_market_table,
     nationality_market_table,
@@ -4167,6 +4157,7 @@ def create_final_report(
     return output.getvalue()
 
 
+@st.cache_data(show_spinner=False, max_entries=3)
 def create_excel_report(
     original_data,
     filtered_data,
@@ -4493,7 +4484,9 @@ def show_unavailable_message(field_name):
 # FILE UPLOAD
 # =========================================================
 
-uploaded_file = st.file_uploader(
+page = workspace_navigation()
+
+uploaded_file = st.sidebar.file_uploader(
     "Upload the registration CSV file",
     type=["csv"],
     help=(
@@ -4503,6 +4496,9 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is None:
+    if page == "Corporate Sales":
+        render_corporate_sales(pd.DataFrame(columns=['Corporate Group','Grouped Category']), CATEGORY_ORDER)
+        st.stop()
     st.info(
         "Upload a registration CSV file to begin."
     )
@@ -4759,89 +4755,57 @@ except Exception as error:
 # SIDEBAR FILTERS
 # =========================================================
 
-st.sidebar.header("Dashboard Filters")
+valid_dates = prepared_df["Registration Date Only"].dropna()
+available_categories = [c for c in CATEGORY_ORDER if c in prepared_df["Grouped Category"].unique()]
+available_genders = sorted(prepared_df["Gender Clean"].dropna().unique().tolist())
+available_age_groups = [a for a in AGE_GROUP_ORDER if a in prepared_df["Age Group"].unique()]
+available_markets = sorted(prepared_df["Market"].dropna().unique().tolist())
+available_countries = sorted(prepared_df["Country Clean"].dropna().unique().tolist())
+filter_options = {"Race categories":available_categories,"Gender":available_genders,
+    "Age groups":available_age_groups,"Market":available_markets,"Countries":available_countries}
 
-valid_dates = prepared_df[
-    "Registration Date Only"
-].dropna()
+def reset_filters():
+    for key in list(st.session_state):
+        if key.startswith("filter_"):
+            del st.session_state[key]
 
-if not valid_dates.empty:
-    minimum_date = valid_dates.min().date()
-    maximum_date = valid_dates.max().date()
+upload_signature = (uploaded_file.name, len(source_df), tuple(str(v) for v in (valid_dates.min(),valid_dates.max())), tuple(available_categories))
+if st.session_state.get("upload_filter_signature") != upload_signature:
+    reset_filters()
+    st.session_state.upload_filter_signature = upload_signature
 
-    selected_date_range = st.sidebar.date_input(
-        "Registration date range",
-        value=(minimum_date, maximum_date),
-        min_value=minimum_date,
-        max_value=maximum_date,
-    )
-else:
-    selected_date_range = None
-
-available_categories = [
-    category
-    for category in CATEGORY_ORDER
-    if category in prepared_df[
-        "Grouped Category"
-    ].unique()
-]
-
-selected_categories = st.sidebar.multiselect(
-    "Race categories",
-    options=available_categories,
-    default=available_categories,
-)
-
-available_genders = sorted(
-    prepared_df["Gender Clean"]
-    .dropna()
-    .unique()
-    .tolist()
-)
-
-selected_genders = st.sidebar.multiselect(
-    "Gender",
-    options=available_genders,
-    default=available_genders,
-)
-
-available_age_groups = [
-    age_group
-    for age_group in AGE_GROUP_ORDER
-    if age_group in prepared_df["Age Group"].unique()
-]
-
-selected_age_groups = st.sidebar.multiselect(
-    "Age groups",
-    options=available_age_groups,
-    default=available_age_groups,
-)
-
-available_markets = sorted(
-    prepared_df["Market"]
-    .dropna()
-    .unique()
-    .tolist()
-)
-
-selected_markets = st.sidebar.multiselect(
-    "Market",
-    options=available_markets,
-    default=available_markets,
-)
-
-available_countries = sorted(
-    prepared_df["Country Clean"]
-    .dropna()
-    .unique()
-    .tolist()
-)
-
-selected_countries = st.sidebar.multiselect(
-    "Countries",
-    options=available_countries,
-    default=available_countries,
-)
+active_count = sum(st.session_state.get("filter_"+label, options) != options for label,options in filter_options.items())
+active_count += int(st.session_state.get("filter_period", "All data") != "All data")
+with st.sidebar.expander(f"Filters · {active_count} active", expanded=False):
+    st.button("Reset filters",on_click=reset_filters)
+    if not valid_dates.empty:
+        minimum_date, maximum_date = valid_dates.min().date(), valid_dates.max().date()
+        period = st.selectbox("Date range",["All data","Last 7 days","Last 30 days","Custom"],key="filter_period")
+        if period == "Custom" and minimum_date < maximum_date:
+            selected_date_range = st.slider("Registration dates",min_value=minimum_date,max_value=maximum_date,
+                value=(minimum_date,maximum_date),format="DD MMM YYYY",key="filter_dates")
+        elif period == "Custom" or period == "All data":
+            selected_date_range = (minimum_date,maximum_date)
+        else:
+            days = 7 if period == "Last 7 days" else 30
+            selected_date_range = (max(minimum_date,maximum_date-timedelta(days=days-1)),maximum_date)
+        st.caption(f"{selected_date_range[0]:%d %b %Y} – {selected_date_range[1]:%d %b %Y} · based on uploaded data")
+    else:
+        selected_date_range = None
+    selections = {}
+    for label,options in filter_options.items():
+        key = "filter_"+label
+        if key in st.session_state:
+            st.session_state[key] = [v for v in st.session_state[key] if v in options]
+        selections[label] = st.multiselect(label,options=options,default=options,key=key)
+selected_categories = selections["Race categories"]
+selected_genders = selections["Gender"]
+selected_age_groups = selections["Age groups"]
+selected_markets = selections["Market"]
+selected_countries = selections["Countries"]
+summary = [f"{selected_date_range[0]:%d %b}–{selected_date_range[1]:%d %b %Y}"] if selected_date_range else []
+summary += [f"{label}: {len(selections[label])} selected" for label,options in filter_options.items() if selections[label] != options]
+st.caption("Viewing: " + " · ".join(summary) + (" · Capacity administration uses the full upload." if page == "Slots & campaigns" else ""))
 
 filtered_df = apply_filters(
     data=prepared_df,
@@ -4961,69 +4925,71 @@ complimentary_category_counts, complimentary_category_display = (
     create_complimentary_category_table(filtered_df)
 )
 
-excel_report_bytes = create_excel_report(
-    original_data=source_df,
-    filtered_data=filtered_df,
-    category_summary=category_summary,
-    category_pace=category_pace,
-    daily_summary=daily_summary,
-    age_summary=age_summary,
-    gender_summary=gender_summary,
-    country_summary=country_summary,
-    quality_summary=quality_summary,
-    tracker_table=tracker_table,
-    target_progress=target_progress,
-    registration_mix_table=registration_mix_table,
-    corporate_category_display=corporate_category_display,
-    addon_summary_table=addon_summary_table,
-    addon_market_category_trackers=addon_market_category_trackers,
-    country_market_table=country_market_table,
-    nationality_market_table=nationality_market_table,
-    age_gender_table=age_gender_table,
-    category_gender_table=category_gender_table,
-    age_category_gender_grid=age_category_gender_grid,
-    capacity_segment_table=capacity_segment_table,
-    channel_trackers=channel_trackers,
-    channel_trackers_daily=channel_trackers_daily,
-    complimentary_category_display=complimentary_category_display,
-)
+if page == "Reports & data":
+    excel_report_bytes = create_excel_report(
+        original_data=source_df,
+        filtered_data=filtered_df,
+        category_summary=category_summary,
+        category_pace=category_pace,
+        daily_summary=daily_summary,
+        age_summary=age_summary,
+        gender_summary=gender_summary,
+        country_summary=country_summary,
+        quality_summary=quality_summary,
+        tracker_table=tracker_table,
+        target_progress=target_progress,
+        registration_mix_table=registration_mix_table,
+        corporate_category_display=corporate_category_display,
+        addon_summary_table=addon_summary_table,
+        addon_market_category_trackers=addon_market_category_trackers,
+        country_market_table=country_market_table,
+        nationality_market_table=nationality_market_table,
+        age_gender_table=age_gender_table,
+        category_gender_table=category_gender_table,
+        age_category_gender_grid=age_category_gender_grid,
+        capacity_segment_table=capacity_segment_table,
+        channel_trackers=channel_trackers,
+        channel_trackers_daily=channel_trackers_daily,
+        complimentary_category_display=complimentary_category_display,
+    )
 
-archive_csv_bytes = create_archive_csv_bundle(
-    tables={
-        "SG vs Non-SG (Country)": country_market_table,
-        "SG vs Non-SG (Nationality)": nationality_market_table,
-        "Age & Gender Splits": age_gender_table,
-        "Category & Gender Splits": category_gender_table,
-        "Age x Category x Gender": age_category_gender_grid,
-        "Capacity by Segment": capacity_segment_table,
-        "Corporate Utilisation": corporate_category_counts,
-        "Complimentary Utilisation": (
-            complimentary_category_counts
-        ),
-        "Category Summary": category_summary,
-        "Target Progress": target_progress,
-        "Tracker - Retail (Cumulative)": channel_trackers.get(
-            "Retail (excl. corporate & complimentary)"
-        ),
-        "Tracker - Corporate (Cumulative)": (
-            channel_trackers.get("Corporate")
-        ),
-        "Tracker - Complimentary (Cumulative)": (
-            channel_trackers.get("Complimentary")
-        ),
-        "Tracker - Retail (Daily)": (
-            channel_trackers_daily.get(
+if page == "Reports & data":
+    archive_csv_bytes = create_archive_csv_bundle(
+        tables={
+            "SG vs Non-SG (Country)": country_market_table,
+            "SG vs Non-SG (Nationality)": nationality_market_table,
+            "Age & Gender Splits": age_gender_table,
+            "Category & Gender Splits": category_gender_table,
+            "Age x Category x Gender": age_category_gender_grid,
+            "Capacity by Segment": capacity_segment_table,
+            "Corporate Utilisation": corporate_category_counts,
+            "Complimentary Utilisation": (
+                complimentary_category_counts
+            ),
+            "Category Summary": category_summary,
+            "Target Progress": target_progress,
+            "Tracker - Retail (Cumulative)": channel_trackers.get(
                 "Retail (excl. corporate & complimentary)"
-            )
-        ),
-        "Tracker - Corporate (Daily)": (
-            channel_trackers_daily.get("Corporate")
-        ),
-        "Tracker - Complimentary (Daily)": (
-            channel_trackers_daily.get("Complimentary")
-        ),
-    }
-)
+            ),
+            "Tracker - Corporate (Cumulative)": (
+                channel_trackers.get("Corporate")
+            ),
+            "Tracker - Complimentary (Cumulative)": (
+                channel_trackers.get("Complimentary")
+            ),
+            "Tracker - Retail (Daily)": (
+                channel_trackers_daily.get(
+                    "Retail (excl. corporate & complimentary)"
+                )
+            ),
+            "Tracker - Corporate (Daily)": (
+                channel_trackers_daily.get("Corporate")
+            ),
+            "Tracker - Complimentary (Daily)": (
+                channel_trackers_daily.get("Complimentary")
+            ),
+        }
+    )
 
 original_filename = Path(uploaded_file.name).stem
 
@@ -5065,68 +5031,54 @@ if not overall_tracker_daily.empty:
 
 weekly_summary_table = create_weekly_summary_table(filtered_df)
 
-final_report_bytes = create_final_report(
-    country_market_table=country_market_table,
-    nationality_market_table=nationality_market_table,
-    age_gender_table=age_gender_table,
-    category_gender_table=category_gender_table,
-    age_category_gender_grid=age_category_gender_grid,
-    all_registration_data=filtered_df,
-    momentum_period_data=momentum_period_df,
-    slot_breakdown_tables=slot_breakdown_tables,
-    corporate_utilisation_final=corporate_utilisation_final,
-    complimentary_utilisation_final=(
-        complimentary_utilisation_final
-    ),
-    overall_tracker_cumulative=tracker_table,
-    channel_trackers_cumulative=channel_trackers,
-    overall_tracker_daily=overall_tracker_daily,
-    channel_trackers_daily_final=channel_trackers_daily,
-    weekly_summary_table=weekly_summary_table,
-)
+if page == "Reports & data":
+    final_report_bytes = create_final_report(
+        country_market_table=country_market_table,
+        nationality_market_table=nationality_market_table,
+        age_gender_table=age_gender_table,
+        category_gender_table=category_gender_table,
+        age_category_gender_grid=age_category_gender_grid,
+        all_registration_data=filtered_df,
+        momentum_period_data=momentum_period_df,
+        slot_breakdown_tables=slot_breakdown_tables,
+        corporate_utilisation_final=corporate_utilisation_final,
+        complimentary_utilisation_final=(
+            complimentary_utilisation_final
+        ),
+        overall_tracker_cumulative=tracker_table,
+        channel_trackers_cumulative=channel_trackers,
+        overall_tracker_daily=overall_tracker_daily,
+        channel_trackers_daily_final=channel_trackers_daily,
+        weekly_summary_table=weekly_summary_table,
+    )
 
 bundled_promo_campaigns = load_bundled_promo_lists()
+
+if page == "Corporate Sales":
+    render_corporate_sales(prepared_df, CATEGORY_ORDER)
+
+if page == "Management Slot Planning":
+    render_slot_planning(prepared_df, CATEGORY_ORDER, promo_code_column, assign_grouped_category)
 
 
 # =========================================================
 # DASHBOARD TABS
 # =========================================================
 
-(
-    snapshot_tab,
-    overview_tab,
-    trends_tab,
-    category_tab,
-    demographics_tab,
-    country_tab,
-    corporate_tab,
-    promo_audit_tab,
-    timing_tab,
-    quality_tab,
-    tracker_tab,
-) = st.tabs(
-    [
-        "Executive Snapshot",
-        "Executive Overview",
-        "Registration Trends",
-        "Category Performance",
-        "Participant Demographics",
-        "Country Analysis",
-        "Corporate, Comps & Add-Ons",
-        "Promo Campaign Audit",
-        "Registration Timing",
-        "Data Quality",
-        "Registration Tracker",
-    ]
-)
+st.caption(f"{len(prepared_df):,} uploaded registrations · {len(filtered_df):,} in current selection · data through {valid_dates.max():%d %b %Y}" if not valid_dates.empty else "No valid registration dates")
+if page == "Slots & campaigns":
+    allocation_groups = {name:list(categories) for name,categories in TARGET_GROUPS.items()}
+    allocation_groups["BYD Marathon"].append("BYD Marathon Crew Challenge")
+    render_admin(prepared_df, promo_code_column, allocation_groups, CATEGORY_TARGETS, REGISTRATION_CLOSE_DATE)
+
 
 
 # =========================================================
 # TAB 0: EXECUTIVE SNAPSHOT
 # =========================================================
 
-with snapshot_tab:
-    st.subheader("Executive Snapshot")
+if page == "Reports & data":
+    st.subheader("Management reports")
 
     latest_snapshot_date = (
         kpis["latest_date"].strftime("%d %b %Y")
@@ -5350,8 +5302,8 @@ with snapshot_tab:
 # TAB 1: EXECUTIVE OVERVIEW
 # =========================================================
 
-with overview_tab:
-    st.subheader("Executive Overview")
+if page == "Overview":
+    st.subheader("Registration overview")
 
     st.caption(
         f"Registration closes "
@@ -5532,7 +5484,7 @@ with overview_tab:
             height=340,
         )
 
-        st.plotly_chart(
+        render_chart(
             progress_figure,
             use_container_width=True,
         )
@@ -5645,7 +5597,7 @@ with overview_tab:
                 showlegend=False,
             )
 
-            st.plotly_chart(
+            render_chart(
                 figure,
                 use_container_width=True,
             )
@@ -5685,7 +5637,7 @@ with overview_tab:
             },
         )
 
-        st.plotly_chart(
+        render_chart(
             figure,
             use_container_width=True,
         )
@@ -5772,7 +5724,7 @@ with overview_tab:
 # TAB 2: REGISTRATION TRENDS
 # =========================================================
 
-with trends_tab:
+if page == "Daily registration":
     st.subheader("Registration Trends")
 
     if daily_summary.empty:
@@ -5872,7 +5824,7 @@ with trends_tab:
             hovermode="x unified",
         )
 
-        st.plotly_chart(
+        render_chart(
             daily_figure,
             use_container_width=True,
         )
@@ -5976,7 +5928,7 @@ with trends_tab:
             hovermode="x unified",
         )
 
-        st.plotly_chart(
+        render_chart(
             cumulative_figure,
             use_container_width=True,
         )
@@ -6057,7 +6009,7 @@ with trends_tab:
             hovermode="x unified",
         )
 
-        st.plotly_chart(
+        render_chart(
             rolling_figure,
             use_container_width=True,
         )
@@ -6128,7 +6080,7 @@ with trends_tab:
 # TAB 3: CATEGORY PERFORMANCE
 # =========================================================
 
-with category_tab:
+if page == "Overview":
     st.subheader("Category Performance")
 
     category_display = category_summary.copy()
@@ -6165,7 +6117,7 @@ with category_tab:
         showlegend=False,
     )
 
-    st.plotly_chart(
+    render_chart(
         category_figure,
         use_container_width=True,
     )
@@ -6286,7 +6238,7 @@ with category_tab:
         "are not meaningful."
     )
 
-    st.plotly_chart(
+    render_chart(
         pace_chart,
         use_container_width=True,
     )
@@ -6344,7 +6296,7 @@ with category_tab:
             hovermode="x unified",
         )
 
-        st.plotly_chart(
+        render_chart(
             category_trend_figure,
             use_container_width=True,
         )
@@ -6354,7 +6306,7 @@ with category_tab:
 # TAB 4: DEMOGRAPHICS
 # =========================================================
 
-with demographics_tab:
+if page == "Audience & markets":
     st.subheader("Participant Demographics")
 
     demographic_column_1, demographic_column_2 = (
@@ -6382,7 +6334,7 @@ with demographics_tab:
                 showlegend=False,
             )
 
-            st.plotly_chart(
+            render_chart(
                 age_figure,
                 use_container_width=True,
             )
@@ -6431,7 +6383,7 @@ with demographics_tab:
                 textinfo="label+percent",
             )
 
-            st.plotly_chart(
+            render_chart(
                 gender_figure,
                 use_container_width=True,
             )
@@ -6506,7 +6458,7 @@ with demographics_tab:
             legend_title="Age group",
         )
 
-        st.plotly_chart(
+        render_chart(
             age_category_figure,
             use_container_width=True,
         )
@@ -6555,7 +6507,7 @@ with demographics_tab:
             legend_title="Gender",
         )
 
-        st.plotly_chart(
+        render_chart(
             gender_category_figure,
             use_container_width=True,
         )
@@ -6565,7 +6517,7 @@ with demographics_tab:
 # TAB 5: COUNTRY ANALYSIS
 # =========================================================
 
-with country_tab:
+if page == "Audience & markets":
     st.subheader("Country and Market Analysis")
 
     if country_column is None:
@@ -6721,7 +6673,7 @@ with country_tab:
             },
         )
 
-        st.plotly_chart(
+        render_chart(
             country_figure,
             use_container_width=True,
         )
@@ -6757,7 +6709,7 @@ with country_tab:
             textinfo="label+percent",
         )
 
-        st.plotly_chart(
+        render_chart(
             market_figure,
             use_container_width=True,
         )
@@ -6800,7 +6752,7 @@ with country_tab:
             legend_title="Market",
         )
 
-        st.plotly_chart(
+        render_chart(
             market_category_figure,
             use_container_width=True,
         )
@@ -6810,7 +6762,7 @@ with country_tab:
 # TAB 6: CORPORATE, COMPS AND ADD-ONS
 # =========================================================
 
-with corporate_tab:
+if page == "Groups & complimentary":
     st.subheader("Corporate, Comps & Add-Ons")
 
     if group_corporate_column is None:
@@ -6931,7 +6883,7 @@ with corporate_tab:
             hovermode="x unified",
         )
 
-        st.plotly_chart(
+        render_chart(
             mix_figure,
             use_container_width=True,
         )
@@ -7001,7 +6953,7 @@ with corporate_tab:
                 yaxis_title="",
             )
 
-            st.plotly_chart(
+            render_chart(
                 programme_figure,
                 use_container_width=True,
             )
@@ -7083,7 +7035,7 @@ with corporate_tab:
                 ),
             )
 
-            st.plotly_chart(
+            render_chart(
                 share_figure,
                 use_container_width=True,
             )
@@ -7183,7 +7135,7 @@ with corporate_tab:
                 yaxis_title="",
             )
 
-            st.plotly_chart(
+            render_chart(
                 addon_figure,
                 use_container_width=True,
             )
@@ -7265,7 +7217,7 @@ with corporate_tab:
 # TAB 6.5: PROMO CAMPAIGN AUDIT
 # =========================================================
 
-with promo_audit_tab:
+if page == "Slots & campaigns":
     st.subheader("Promo Campaign Audit")
 
     st.caption(
@@ -7373,12 +7325,12 @@ with promo_audit_tab:
             )
 
             promo_metric_2.metric(
-                "Codes Redeemed",
-                f"{promo_summary['total_matched']:,}",
+                "Unique Codes Redeemed",
+                f"{promo_summary['unique_redeemed']:,}",
             )
 
             promo_metric_3.metric(
-                "Utilisation Rate",
+                "Code Redemption Rate",
                 f"{promo_summary['utilisation_rate'] * 100:.1f}%",
             )
 
@@ -7425,7 +7377,7 @@ with promo_audit_tab:
                     },
                 )
 
-                st.plotly_chart(
+                render_chart(
                     category_figure,
                     use_container_width=True,
                 )
@@ -7466,7 +7418,7 @@ with promo_audit_tab:
                     textinfo="label+percent",
                 )
 
-                st.plotly_chart(
+                render_chart(
                     nationality_figure,
                     use_container_width=True,
                 )
@@ -7549,7 +7501,7 @@ with promo_audit_tab:
 # TAB 7: REGISTRATION TIMING
 # =========================================================
 
-with timing_tab:
+if page == "Daily registration":
     st.subheader("Registration Timing Analysis")
 
     valid_timing_data = filtered_df.dropna(
@@ -7614,7 +7566,7 @@ with timing_tab:
             yaxis_title="Registrations",
         )
 
-        st.plotly_chart(
+        render_chart(
             weekday_figure,
             use_container_width=True,
         )
@@ -7691,7 +7643,7 @@ with timing_tab:
                 yaxis_title="Registrations",
             )
 
-            st.plotly_chart(
+            render_chart(
                 hourly_figure,
                 use_container_width=True,
             )
@@ -7772,7 +7724,7 @@ with timing_tab:
                 height=380,
             )
 
-            st.plotly_chart(
+            render_chart(
                 heatmap_figure,
                 use_container_width=True,
             )
@@ -7815,7 +7767,7 @@ with timing_tab:
 # TAB 7: DATA QUALITY
 # =========================================================
 
-with quality_tab:
+if page == "Reports & data":
     st.subheader("Data Quality")
 
     st.dataframe(
@@ -7843,7 +7795,7 @@ with quality_tab:
         yaxis_title="",
     )
 
-    st.plotly_chart(
+    render_chart(
         quality_figure,
         use_container_width=True,
     )
@@ -7906,7 +7858,7 @@ with quality_tab:
 # TAB 8: REGISTRATION TRACKER
 # =========================================================
 
-with tracker_tab:
+if page == "Reports & data":
     st.subheader("Registration Tracker")
 
     tracker_mode = st.radio(
@@ -7977,7 +7929,7 @@ with tracker_tab:
             showlegend=False,
         )
 
-        st.plotly_chart(
+        render_chart(
             weekly_figure,
             use_container_width=True,
         )
@@ -8092,4 +8044,4 @@ with tracker_tab:
             ),
             use_container_width=True,
             key="tracker_download_final",
-        )
+        )
