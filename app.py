@@ -254,24 +254,6 @@ FINAL_REPORT_CATEGORY_MAP = {
     "Kids (600)": ["Kids Dash Non-Competitive 600m"],
 }
 
-# =========================================================
-# PROMO CAMPAIGN AUDIT
-# =========================================================
-# Bundled promo-code allowlists live in this folder, one file per
-# campaign (CSV or XLSX, any column with a code-like name — see
-# COLUMN_ALIASES["promo_code"]). Drop a new file in here for a
-# future campaign; no code changes needed. The filename (minus
-# extension) becomes the campaign's display name.
-PROMO_LISTS_FOLDER = "promo_lists"
-
-# The nationality breakdown singles out any country worth tracking
-# by name (e.g. Malaysia, for the KL Half cross-promotion) rather
-# than collapsing everything non-Singapore into "International".
-# Add more entries here for future campaigns targeting other
-# specific countries; anything not listed falls into "Other
-# International".
-PROMO_AUDIT_NAMED_COUNTRIES = ["Malaysia"]
-
 # Targets are defined per "target group". The two Kids Dash 1.6KM
 # categories share one combined target of 1,500 (per management
 # guidance). The Crew Challenge has no registration target.
@@ -2368,218 +2350,6 @@ def build_timing_commentary(weekday_table):
         f"Best performing days: {top_days} "
         f"({int(day_counts.iloc[0]):,} registrations on the "
         "strongest day)."
-    )
-
-
-def load_bundled_promo_lists():
-    """
-    Scan PROMO_LISTS_FOLDER for campaign promo-code allowlists.
-    Each file (CSV or XLSX) becomes one campaign, named after its
-    filename. Returns a dict of {campaign_label: set_of_codes}.
-    Missing folder or unreadable files are skipped quietly — this
-    is a convenience feature, not something that should crash the
-    dashboard if the folder is absent.
-    """
-    campaigns = {}
-
-    folder = Path(__file__).parent / PROMO_LISTS_FOLDER
-
-    if not folder.exists():
-        return campaigns
-
-    for file_path in sorted(folder.iterdir()):
-        if file_path.suffix.lower() not in (".csv", ".xlsx"):
-            continue
-
-        try:
-            if file_path.suffix.lower() == ".csv":
-                list_data = pd.read_csv(
-                    file_path, encoding="utf-8-sig"
-                )
-            else:
-                list_data = pd.read_excel(file_path)
-        except Exception:
-            continue
-
-        code_column = detect_column(
-            list_data.columns,
-            COLUMN_ALIASES["promo_code"],
-        )
-
-        if code_column is None:
-            continue
-
-        codes = set(
-            list_data[code_column]
-            .dropna()
-            .astype(str)
-            .str.strip()
-        )
-
-        codes.discard("")
-
-        if codes:
-            campaigns[file_path.stem] = codes
-
-    return campaigns
-
-
-def classify_named_market(country):
-    """
-    Three-or-more-way market classification for promo audits:
-    Singapore, any specifically named country (see
-    PROMO_AUDIT_NAMED_COUNTRIES — e.g. Malaysia for the KL Half
-    cross-promotion), Other International, or Unknown.
-    """
-    if country == "Singapore":
-        return "Singapore"
-
-    if country == "Unknown":
-        return "Unknown"
-
-    if country in PROMO_AUDIT_NAMED_COUNTRIES:
-        return country
-
-    return "Other International"
-
-
-def create_promo_audit_summary(
-    data, promo_code_column, valid_codes
-):
-    """
-    Match registrations against a promo-code allowlist and return
-    (matched_rows, summary_metrics, category_breakdown,
-    nationality_breakdown, addon_attach_summary).
-
-    Matching is by exact promo code, not price — a participant
-    who also bought an add-on still shows the same base $38 promo
-    price plus the add-on cost, which would make price-based
-    matching unreliable; matching on the code itself sidesteps
-    that entirely.
-    """
-    codes_used = (
-        data[promo_code_column]
-        .astype(str)
-        .str.strip()
-    )
-
-    matched_rows = data[codes_used.isin(valid_codes)]
-
-    total_valid_codes = len(valid_codes)
-    total_matched = len(matched_rows)
-
-    summary_metrics = {
-        "total_codes": total_valid_codes,
-        "total_matched": total_matched,
-        "unique_redeemed": matched_rows[promo_code_column].astype(str).str.strip().nunique(),
-        "utilisation_rate": (
-            matched_rows[promo_code_column].astype(str).str.strip().nunique() / total_valid_codes
-            if total_valid_codes
-            else 0
-        ),
-    }
-
-    mapped_matches = matched_rows[
-        matched_rows["Grouped Category"].ne("Unmapped")
-    ]
-
-    category_counts = (
-        mapped_matches["Grouped Category"]
-        .value_counts()
-        .reindex(CATEGORY_ORDER, fill_value=0)
-    )
-
-    category_counts = category_counts[
-        category_counts > 0
-    ].sort_values(ascending=False)
-
-    category_breakdown = pd.DataFrame(
-        {
-            "Registrations": category_counts,
-            "Share of Promo Users": (
-                category_counts / total_matched
-                if total_matched
-                else category_counts
-            ),
-        }
-    )
-
-    category_breakdown.index.name = "Category"
-
-    # Nationality is the semantically correct field for "which
-    # country are these participants actually from" — it falls
-    # back to Country only when Nationality was not provided.
-    nationality_source_column = (
-        "Nationality Clean"
-        if "Nationality Clean" in matched_rows.columns
-        and matched_rows["Nationality Clean"].notna().any()
-        else "Country Clean"
-    )
-
-    nationality_labels = matched_rows[
-        nationality_source_column
-    ].apply(classify_named_market)
-
-    nationality_counts = nationality_labels.value_counts()
-
-    named_order = (
-        ["Singapore"]
-        + PROMO_AUDIT_NAMED_COUNTRIES
-        + ["Other International", "Unknown"]
-    )
-
-    nationality_counts = nationality_counts.reindex(
-        named_order, fill_value=0
-    )
-
-    nationality_counts = nationality_counts[
-        nationality_counts > 0
-    ]
-
-    nationality_breakdown = pd.DataFrame(
-        {
-            "Registrations": nationality_counts,
-            "Share of Promo Users": (
-                nationality_counts / total_matched
-                if total_matched
-                else nationality_counts
-            ),
-        }
-    )
-
-    nationality_breakdown.index.name = (
-        "Nationality"
-        if nationality_source_column == "Nationality Clean"
-        else "Country"
-    )
-
-    addon_flag_columns = [
-        column
-        for column in matched_rows.columns
-        if column.startswith("Addon ")
-    ]
-
-    if addon_flag_columns and total_matched:
-        any_addon = (
-            matched_rows[addon_flag_columns].sum(axis=1) > 0
-        )
-
-        addon_attach_summary = {
-            "with_addon": int(any_addon.sum()),
-            "without_addon": int((~any_addon).sum()),
-            "attach_rate": float(
-                any_addon.sum() / total_matched
-            ),
-        }
-    else:
-        addon_attach_summary = None
-
-    return (
-        matched_rows,
-        summary_metrics,
-        category_breakdown,
-        nationality_breakdown,
-        addon_attach_summary,
     )
 
 
@@ -6524,23 +6294,16 @@ if page == "Audience & markets":
             f"{international_share:.1f}%",
         )
 
-        top_country_count = st.slider(
-            "Number of countries to display",
-            min_value=5,
-            max_value=min(
-                30,
-                max(
-                    5,
-                    len(country_summary),
-                ),
-            ),
-            value=min(
-                10,
-                max(
-                    5,
-                    len(country_summary),
-                ),
-            ),
+        country_count = len(country_summary)
+        top_country_count = (
+            st.slider(
+                "Number of countries to display",
+                min_value=5,
+                max_value=min(30, country_count),
+                value=min(10, country_count),
+            )
+            if country_count > 5
+            else country_count
         )
 
         top_countries = (
