@@ -87,6 +87,30 @@ def test_corporate_utilization_auto_matches_and_lists_every_company(local_store)
     assert saved['companies'][0]['aliases'] == ['ACME']
 
 
+def corporate_no_upload_script():
+    from views.router import render_planning_page
+    render_planning_page('Corporate Sales', None, None)
+
+
+def test_corporate_without_upload_says_so_and_allows_typed_links(local_store):
+    import json
+    import sales_store
+    store = sales_store.new_store()
+    store['companies'] = [{'id': 'c1', 'name': 'SUNWAY MCL LIMITED', 'aliases': []}]
+    (local_store / 'corporate_sales.json').write_text(json.dumps(store), encoding='utf-8')
+    app = AppTest.from_function(corporate_no_upload_script, default_timeout=30)
+    app.run()
+    assert not app.exception, app.exception
+    assert any('No registration data in this session' in w.value for w in app.warning)
+    overview = next(d.value for d in app.dataframe if 'Matching' in d.value.columns)
+    assert overview['Matching'].tolist() == ['Upload registrations']
+    app.text_area(key='sales_aliases_typed_c1').input('SUNWAY MCL LTD\nSUNWAY MCL')
+    next(b for b in app.button if b.label == 'Save registration matching').click().run()
+    assert not app.exception, app.exception
+    saved = json.loads((local_store / 'corporate_sales.json').read_text(encoding='utf-8'))
+    assert saved['companies'][0]['aliases'] == ['SUNWAY MCL LTD', 'SUNWAY MCL']
+
+
 SAMPLE_CSV = '''Registration Date,Current Age,Gender,Country,Category Name,Group/Corporate Name,Promo Code - Code
 01/09/2026 10:00,34,Male,Singapore,BYD Marathon (42.195KM),GROUP_REGISTRATION_Acme Batch 1 - Tan,
 02/09/2026 11:00,28,Female,Malaysia,adidas Half Marathon (21.1KM),,EARLY
