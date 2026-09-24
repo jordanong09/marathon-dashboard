@@ -1,9 +1,9 @@
 from datetime import timedelta
 import csv
-from corporate_sales import render_corporate_sales
-from slot_planning import render_slot_planning
 import base64
-from admin_dashboard import style_dashboard, render_admin, workspace_navigation, render_chart
+from admin_dashboard import style_dashboard, workspace_navigation, render_chart
+from planning.categories import PLANNING_CATEGORIES
+from views.router import PLANNING_PAGES, render_planning_page
 import re
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -304,10 +304,14 @@ CATEGORY_TARGETS = {
     "Kids Dash 600m": 2500,
 }
 
-if "allocation_plan" in st.session_state:
-    for _, saved_plan in st.session_state.allocation_plan.iterrows():
-        if saved_plan["Category"] in CATEGORY_TARGETS:
-            CATEGORY_TARGETS[saved_plan["Category"]] = int(saved_plan["Target"])
+# Overview pacing targets follow the saved plan capacity (same order as TARGET_GROUPS).
+try:
+    from views.common import get_doc
+    _plan_capacity = get_doc("plan")["capacity"]
+    for _planning_category, _target_group in zip(PLANNING_CATEGORIES, TARGET_GROUPS):
+        CATEGORY_TARGETS[_target_group] = int(_plan_capacity.get(_planning_category, CATEGORY_TARGETS[_target_group]))
+except (OSError, ValueError, KeyError):
+    pass  # Keep built-in targets; planning pages show the storage error.
 
 # Campaign milestones are drawn as dotted vertical markers on every
 # time-series chart so registration spikes explain themselves.
@@ -4496,8 +4500,8 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 if uploaded_file is None:
-    if page == "Corporate Sales":
-        render_corporate_sales(pd.DataFrame(columns=['Corporate Group','Grouped Category']), CATEGORY_ORDER)
+    if page in PLANNING_PAGES:
+        render_planning_page(page, None, None)
         st.stop()
     st.info(
         "Upload a registration CSV file to begin."
@@ -4805,7 +4809,7 @@ selected_markets = selections["Market"]
 selected_countries = selections["Countries"]
 summary = [f"{selected_date_range[0]:%d %b}–{selected_date_range[1]:%d %b %Y}"] if selected_date_range else []
 summary += [f"{label}: {len(selections[label])} selected" for label,options in filter_options.items() if selections[label] != options]
-st.caption("Viewing: " + " · ".join(summary) + (" · Capacity administration uses the full upload." if page == "Slots & campaigns" else ""))
+st.caption("Viewing: " + " · ".join(summary))
 
 filtered_df = apply_filters(
     data=prepared_df,
@@ -5052,13 +5056,8 @@ if page == "Reports & data":
         weekly_summary_table=weekly_summary_table,
     )
 
-bundled_promo_campaigns = load_bundled_promo_lists()
-
-if page == "Corporate Sales":
-    render_corporate_sales(prepared_df, CATEGORY_ORDER)
-
-if page == "Management Slot Planning":
-    render_slot_planning(prepared_df, CATEGORY_ORDER, promo_code_column, assign_grouped_category)
+if page in PLANNING_PAGES:
+    render_planning_page(page, prepared_df, promo_code_column)
 
 
 # =========================================================
@@ -5066,10 +5065,6 @@ if page == "Management Slot Planning":
 # =========================================================
 
 st.caption(f"{len(prepared_df):,} uploaded registrations · {len(filtered_df):,} in current selection · data through {valid_dates.max():%d %b %Y}" if not valid_dates.empty else "No valid registration dates")
-if page == "Slots & campaigns":
-    allocation_groups = {name:list(categories) for name,categories in TARGET_GROUPS.items()}
-    allocation_groups["BYD Marathon"].append("BYD Marathon Crew Challenge")
-    render_admin(prepared_df, promo_code_column, allocation_groups, CATEGORY_TARGETS, REGISTRATION_CLOSE_DATE)
 
 
 
@@ -7211,290 +7206,6 @@ if page == "Groups & complimentary":
                                 summary_table,
                                 use_container_width=True,
                             )
-
-
-# =========================================================
-# TAB 6.5: PROMO CAMPAIGN AUDIT
-# =========================================================
-
-if page == "Slots & campaigns":
-    st.subheader("Promo Campaign Audit")
-
-    st.caption(
-        "Match registrations against an uploaded promo-code "
-        "allowlist to measure a specific campaign — for example, "
-        "the KL Half cross-promotion offering KL Marathon "
-        "finishers any SGIM category for $38. Matching is by "
-        "exact promo code, not price, so an add-on purchase on "
-        "top of the promo price never causes a false negative."
-    )
-
-    if promo_code_column is None:
-        st.info(
-            "No promo code column was found in this file. "
-            "Select it manually under Source-column "
-            "configuration if it exists under a different name."
-        )
-    else:
-        campaign_options = list(bundled_promo_campaigns.keys()) + [
-            "Upload a different list..."
-        ]
-
-        selected_campaign = st.selectbox(
-            "Campaign",
-            options=campaign_options,
-            help=(
-                "Bundled lists come from the promo_lists folder "
-                "next to app.py — add a new CSV or XLSX file "
-                "there for a future campaign, no code changes "
-                "needed."
-            ),
-        )
-
-        if selected_campaign == "Upload a different list...":
-            adhoc_file = st.file_uploader(
-                "Upload a promo-code allowlist (CSV or XLSX)",
-                type=["csv", "xlsx"],
-                key="promo_audit_adhoc_upload",
-            )
-
-            valid_codes = set()
-
-            if adhoc_file is not None:
-                try:
-                    if adhoc_file.name.lower().endswith(
-                        ".csv"
-                    ):
-                        adhoc_list = pd.read_csv(
-                            adhoc_file, encoding="utf-8-sig"
-                        )
-                    else:
-                        adhoc_list = pd.read_excel(adhoc_file)
-
-                    adhoc_code_column = detect_column(
-                        adhoc_list.columns,
-                        COLUMN_ALIASES["promo_code"],
-                    )
-
-                    if adhoc_code_column is None:
-                        st.warning(
-                            "Could not find a promo code column "
-                            "in the uploaded file."
-                        )
-                    else:
-                        valid_codes = set(
-                            adhoc_list[adhoc_code_column]
-                            .dropna()
-                            .astype(str)
-                            .str.strip()
-                        )
-
-                        valid_codes.discard("")
-                except Exception as error:
-                    st.warning(
-                        f"Could not read that file: {error}"
-                    )
-        else:
-            valid_codes = bundled_promo_campaigns.get(
-                selected_campaign, set()
-            )
-
-        if not valid_codes:
-            st.info(
-                "No promo codes loaded yet — select a bundled "
-                "campaign or upload an allowlist above."
-            )
-        else:
-            (
-                matched_rows,
-                promo_summary,
-                promo_category_breakdown,
-                promo_nationality_breakdown,
-                promo_addon_summary,
-            ) = create_promo_audit_summary(
-                filtered_df, promo_code_column, valid_codes
-            )
-
-            promo_metric_1, promo_metric_2, promo_metric_3 = (
-                st.columns(3)
-            )
-
-            promo_metric_1.metric(
-                "Codes Issued",
-                f"{promo_summary['total_codes']:,}",
-            )
-
-            promo_metric_2.metric(
-                "Unique Codes Redeemed",
-                f"{promo_summary['unique_redeemed']:,}",
-            )
-
-            promo_metric_3.metric(
-                "Code Redemption Rate",
-                f"{promo_summary['utilisation_rate'] * 100:.1f}%",
-            )
-
-            if promo_summary["total_matched"] == 0:
-                st.info(
-                    "No registrations in the current selection "
-                    "matched this campaign's promo codes."
-                )
-            else:
-                st.markdown("#### Which Category Signed Up Most")
-
-                category_chart_data = (
-                    promo_category_breakdown.reset_index()
-                )
-
-                category_figure = px.bar(
-                    category_chart_data,
-                    x="Registrations",
-                    y="Category",
-                    orientation="h",
-                    text="Registrations",
-                )
-
-                top_category_value = category_chart_data[
-                    "Registrations"
-                ].max()
-
-                category_figure.update_traces(
-                    marker_color=[
-                        ACCENT_COLOR
-                        if value == top_category_value
-                        else NEUTRAL_COLOR
-                        for value in category_chart_data[
-                            "Registrations"
-                        ]
-                    ]
-                )
-
-                category_figure.update_layout(
-                    xaxis_title="Registrations via this promo",
-                    yaxis_title="",
-                    yaxis={
-                        "categoryorder": "total ascending",
-                    },
-                )
-
-                render_chart(
-                    category_figure,
-                    use_container_width=True,
-                )
-
-                display_category_breakdown = (
-                    promo_category_breakdown.copy()
-                )
-
-                display_category_breakdown[
-                    "Share of Promo Users"
-                ] = display_category_breakdown[
-                    "Share of Promo Users"
-                ].map(lambda value: f"{value * 100:.1f}%")
-
-                st.dataframe(
-                    display_category_breakdown,
-                    use_container_width=True,
-                )
-
-                st.markdown("#### Who Actually Used It")
-
-                nationality_label = (
-                    promo_nationality_breakdown.index.name
-                )
-
-                nationality_chart_data = (
-                    promo_nationality_breakdown.reset_index()
-                )
-
-                nationality_figure = px.pie(
-                    nationality_chart_data,
-                    names=nationality_label,
-                    values="Registrations",
-                    hole=0.45,
-                )
-
-                nationality_figure.update_traces(
-                    textinfo="label+percent",
-                )
-
-                render_chart(
-                    nationality_figure,
-                    use_container_width=True,
-                )
-
-                display_nationality_breakdown = (
-                    promo_nationality_breakdown.copy()
-                )
-
-                display_nationality_breakdown[
-                    "Share of Promo Users"
-                ] = display_nationality_breakdown[
-                    "Share of Promo Users"
-                ].map(lambda value: f"{value * 100:.1f}%")
-
-                st.dataframe(
-                    display_nationality_breakdown,
-                    use_container_width=True,
-                )
-
-                malaysia_share = (
-                    promo_nationality_breakdown[
-                        "Registrations"
-                    ].get(
-                        PROMO_AUDIT_NAMED_COUNTRIES[0], 0
-                    )
-                    / promo_summary["total_matched"]
-                    * 100
-                )
-
-                singapore_share = (
-                    promo_nationality_breakdown[
-                        "Registrations"
-                    ].get("Singapore", 0)
-                    / promo_summary["total_matched"]
-                    * 100
-                )
-
-                st.caption(
-                    f"{malaysia_share:.0f}% of promo users are "
-                    f"{PROMO_AUDIT_NAMED_COUNTRIES[0]} by "
-                    f"{nationality_label.lower()} — the intended "
-                    "KL Marathon conversion. "
-                    f"{singapore_share:.0f}% are Singaporean, "
-                    "which would mean locals leveraging the "
-                    "offer rather than genuine overseas "
-                    "conversion, if that share is meaningful."
-                )
-
-                if promo_addon_summary is not None:
-                    st.markdown("#### Add-On Attach Among Promo Users")
-
-                    addon_metric_1, addon_metric_2 = st.columns(2)
-
-                    addon_metric_1.metric(
-                        "Bought an Add-On",
-                        f"{promo_addon_summary['with_addon']:,}",
-                        delta=(
-                            f"{promo_addon_summary['attach_rate'] * 100:.0f}% "
-                            "attach rate"
-                        ),
-                        delta_color="off",
-                    )
-
-                    addon_metric_2.metric(
-                        "No Add-On",
-                        f"{promo_addon_summary['without_addon']:,}",
-                    )
-
-                    st.caption(
-                        "Computed directly from the add-on "
-                        "purchase flags, not from price — so a "
-                        "promo user's Participant Sub Total "
-                        "being above $38 never needs to be "
-                        "interpreted; the add-on columns say so "
-                        "directly."
-                    )
 
 
 # =========================================================

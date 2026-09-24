@@ -4,46 +4,26 @@ import copy
 import json
 import uuid
 from datetime import date
-from pathlib import Path
 import pandas as pd
 import streamlit as st
 from sales_store import stage, summarize, MILESTONES, milestone_date, completed, review_flags, waiting_days
-from sales_backend import read_store, save_store, storage_label
+from planning.categories import PLANNING_CATEGORIES, convert_quantities, to_planning_category
+from views.common import save_doc, target_strip
 
-SALES_PATH=Path(__file__).parent/'planning_data'/'corporate_sales.json'
-
-def render_corporate_sales(data,categories,path=None):
-    path=path or SALES_PATH
+def render_corporate_sales(ctx):
+    data=ctx['data'] if ctx['data'] is not None else pd.DataFrame(columns=['Corporate Group','Grouped Category'])
     st.subheader('Corporate Sales')
-    st.caption('DRAFT · Reservations → verified payments → registration links → utilization. Records save independently of registration uploads.')
-    try:
-        backend_label=storage_label()
-        st.caption('Storage: '+backend_label)
-        snapshot_key='sales_records_'+backend_label+str(path)
-        if snapshot_key not in st.session_state:
-            st.session_state[snapshot_key]=read_store(path)
-        records=copy.deepcopy(st.session_state[snapshot_key])
-    except (OSError,ValueError) as error:
-        st.error(f'Cannot read saved sales records: {error}. Existing files have not been changed.')
-        return
+    st.caption('Reservations → verified payments → registration links → utilization. Reserved places count as utilized in the Executive Summary.')
+    target_strip(ctx,'Corporate')
+    records=ctx['docs']['corporate']
+    for order in records['orders']:
+        order['quantities']=convert_quantities(order['quantities'])
     def commit(changed,action):
-        try:
-            saved=save_store(path,changed,records['revision'],action)
-            st.session_state[snapshot_key]=saved
-        except (ValueError,OSError) as error:
-            st.error(f'Not saved: {error}')
-            return
-        st.session_state.sales_saved_notice=action+' — saved to '+backend_label+'.'
-        st.rerun()
-    if 'sales_saved_notice' in st.session_state:
-        st.success(st.session_state.pop('sales_saved_notice'))
-    if st.button('Reload saved sales records'):
-        st.session_state.pop(snapshot_key,None)
-        st.rerun()
+        save_doc('corporate',changed,action)
     st.caption(f"Saved revision {records['revision']} · {records.get('saved_at','No records saved yet')}")
     st.download_button('Download sales backup',json.dumps(records,indent=2),'corporate-sales-backup.json','application/json')
     companies=records['companies']; orders=records['orders']
-    categories=list(dict.fromkeys(list(categories)+[c for o in orders for c in o['quantities']]))
+    categories=list(dict.fromkeys(PLANNING_CATEGORIES+[c for o in orders for c in o['quantities']]))
     names={c['id']:c['name'] for c in companies}
     available=[] if data.empty else sorted(data['Corporate Group'].dropna().astype(str).unique())
     matched={a.casefold() for c in companies for a in c['aliases']}
@@ -60,7 +40,7 @@ def render_corporate_sales(data,categories,path=None):
         st.query_params['sales_view']=st.session_state.sales_active_tab
     tabs=st.tabs(tab_names,key='sales_active_tab',on_change=remember_tab)
     summary=pd.DataFrame(summarize(orders,categories))
-    summary['Group target']=summary.Category.map(records['targets']).fillna(0).astype(int)
+    summary['Group target']=summary.Category.map(ctx['plan'].loc['Corporate']).fillna(0).astype(int)
     summary['Available to sell']=summary['Group target']-summary.Reserved
     summary['Paid progress %']=summary.Paid/summary['Group target'].replace(0,float('nan'))*100
     with tabs[0]:
@@ -70,14 +50,8 @@ def render_corporate_sales(data,categories,path=None):
         c.metric('Released slots',f'{summary.Released.sum():,}')
         d.metric('Companies with active orders',len({o['company_id'] for o in orders if not o.get('cancelled')}))
         st.dataframe(summary,hide_index=True,width='stretch')
-        if summary['Available to sell'].lt(0).any(): st.warning('Reserved places exceed the saved group target in one or more categories. Review targets before taking further orders.')
-        with st.expander('Set group sales targets'):
-            st.caption('These are persistent corporate-sales budgets. The earlier Management Slot Planning scenario remains separate in this draft.')
-            with st.form('sales_targets'):
-                edited=st.data_editor(summary[['Category','Group target']],disabled=['Category'],hide_index=True,width='stretch',column_config={'Group target':st.column_config.NumberColumn(min_value=0,step=1,required=True)})
-                if st.form_submit_button('Save group targets'):
-                    changed=copy.deepcopy(records); changed['targets']=dict(zip(edited.Category,edited['Group target'].astype(int)))
-                    commit(changed,'Group targets updated')
+        if summary['Available to sell'].lt(0).any(): st.warning('Reserved places exceed the Corporate plan in one or more categories. Ask the executive to review the plan before taking further orders.')
+        st.caption('Group target comes from the Corporate row in Plan Allocation.')
     with tabs[1]:
         with st.form('sales_company'):
             name=st.text_input('Company name')
@@ -163,10 +137,9 @@ def render_corporate_sales(data,categories,path=None):
             company_orders=[o for o in orders if o['company_id']==company['id']]
             actual=data.iloc[0:0] if data.empty else data[data['Corporate Group'].fillna('').str.casefold().isin([a.casefold() for a in company['aliases']])]
             rows=pd.DataFrame(summarize(company_orders,categories))
-            rows['Registered']=rows.Category.map(actual['Grouped Category'].value_counts() if not actual.empty else {}).fillna(0).astype(int)
+            rows['Registered']=rows.Category.map(actual['Grouped Category'].map(to_planning_category).value_counts() if not actual.empty else {}).fillna(0).astype(int)
             if data.empty or not company['aliases']:
                 rows['Registered']=float('nan')
-            rows.loc[rows.Category.str.contains('subtype unconfirmed',case=False),'Registered']=float('nan')
             rows['Unredeemed released places']=rows.Released-rows.Registered
             rows['Utilization %']=rows.Registered/rows.Released.replace(0,float('nan'))*100
             complete=sum(stage(o)=='✓ Complete' for o in company_orders)
