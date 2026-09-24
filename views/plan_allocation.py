@@ -1,6 +1,8 @@
 """Executive-owned plan: category capacity and group allocations."""
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 
@@ -42,9 +44,11 @@ def render_plan_allocation(ctx):
     st.dataframe(style_numbers(check), width='stretch')
     if (capacity - allocated).lt(0).any():
         st.error('Group allocations exceed capacity in at least one category. You can still save, but the plan is oversold.')
+    close = st.date_input('Registration closes', value=date.fromisoformat(ctx['close_date']), key=f"plan_close_{plan_doc['revision']}",
+        help='Pace, projections and recommendations on the Executive Summary run to this date.')
     note = st.text_input('Note for this save (optional)', key='plan_note')
     if st.button('Save plan', type='primary'):
-        save_doc('plan', plan_doc | changed, 'Plan saved' + (': ' + note.strip() if note.strip() else ''))
+        save_doc('plan', plan_doc | changed | {'close_date': close.isoformat()}, 'Plan saved' + (': ' + note.strip() if note.strip() else ''))
     st.download_button('Download plan (CSV)', edited.to_csv(index=False), 'plan-allocation.csv', 'text/csv')
     if plan_doc['history']:
         with st.expander('Save history'):

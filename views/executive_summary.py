@@ -5,7 +5,12 @@ import pandas as pd
 import streamlit as st
 
 from planning.metrics import gaps, group_summary
-from views.common import fmt, pct, style_numbers
+from planning.recommendations import build_events, pace_table, recommendations
+from views.common import fmt, pct, registration_dates, style_numbers
+
+
+def _one_decimal(value):
+    return '—' if pd.isna(value) else f'{value:,.1f}'
 
 
 def render_executive_summary(ctx):
@@ -22,6 +27,25 @@ def render_executive_summary(ctx):
         st.info('No group allocations saved yet. Open Plan Allocation to set the plan.')
     if ctx['data'] is None:
         st.caption('Campaign and retail utilization come from registrations. Upload the registration CSV in the sidebar; until then they show — and are left out of totals.')
+
+    events = build_events(ctx['attributed'], registration_dates(ctx['data']), ctx['docs']['corporate']['orders'], ctx['docs']['complimentary']['issuances'])
+    group_pace = pace_table(plan, utilized, events, ctx['latest_date'], ctx['close_date'])
+    category_pace = pace_table(plan, utilized, events, ctx['latest_date'], ctx['close_date'], by_category=True)
+    days_left = max((pd.Timestamp(ctx['close_date']) - ctx['latest_date']).days, 0)
+    st.markdown('### Recommendations')
+    st.caption(f"Based on the 7 complete days before {ctx['latest_date']:%d %b %Y} · {days_left} days to registration close "
+        f"({pd.Timestamp(ctx['close_date']):%d %b %Y}, set in Plan Allocation).")
+    for level, title, text in recommendations(group_pace, category_pace, unallocated, days_left):
+        getattr(st, level)(f'**{title}** — {text}')
+
+    st.markdown('### Pace to close')
+    shown = group_pace.drop(columns=['Plan', 'Utilized', 'Remaining'])
+    st.dataframe(style_numbers(shown, {'Week on week %': pct, 'Per day': _one_decimal, 'Needed per day': _one_decimal, 'Status': str}), width='stretch')
+    st.caption('Last 7 / Previous 7 days: places reserved (Corporate, by order-form date), issued (Complimentary, by issue date) or registered '
+        '(Campaign and Retail). Projected at close = utilized + current daily pace × days left.')
+    with st.expander('Pace by group and category'):
+        detail = category_pace[category_pace['Plan'].gt(0) | category_pace['Last 7 days'].gt(0)]
+        st.dataframe(style_numbers(detail, {'Week on week %': pct, 'Per day': _one_decimal, 'Needed per day': _one_decimal, 'Status': str}), width='stretch')
 
     st.markdown('### By group')
     st.dataframe(style_numbers(summary, {'% utilized': pct}), width='stretch')

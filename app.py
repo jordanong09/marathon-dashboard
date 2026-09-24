@@ -310,6 +310,7 @@ CATEGORY_TARGETS = {
 try:
     from views.common import get_doc
     _plan_capacity = get_doc("plan")["capacity"]
+    REGISTRATION_CLOSE_DATE = pd.Timestamp(get_doc("plan").get("close_date", REGISTRATION_CLOSE_DATE))
     for _planning_category, _target_group in zip(PLANNING_CATEGORIES, TARGET_GROUPS):
         CATEGORY_TARGETS[_target_group] = int(_plan_capacity.get(_planning_category, CATEGORY_TARGETS[_target_group]))
 except (OSError, ValueError, KeyError):

@@ -188,6 +188,39 @@ def test_campaigns_are_detected_dated_and_small_groups_can_be_added(local_store)
     assert [c['name'] for c in doc_store.read('campaigns')['campaigns']] == ['EARLY', 'MEDIC']
 
 
+def summary_pace_script():
+    import pandas as pd
+    from views.router import render_planning_page
+    days = [d for d in pd.date_range('2026-09-10', '2026-09-23') for _ in range(3)]
+    data = pd.DataFrame({
+        'Grouped Category': ['BYD Marathon'] * len(days),
+        'Corporate Group': [None] * len(days),
+        'Complimentary Programme': [None] * len(days),
+        'Market': ['Singapore'] * len(days),
+        'Promo': [''] * len(days),
+        'Registration Date Only': pd.to_datetime(days + [pd.Timestamp('2026-09-24')])[:len(days)],
+    })
+    data = pd.concat([data, data.head(1).assign(**{'Registration Date Only': pd.Timestamp('2026-09-24')})], ignore_index=True)
+    render_planning_page('Executive Summary', data, 'Promo')
+
+
+def test_executive_summary_shows_recommendations_and_pace(local_store):
+    import doc_store
+    plan = doc_store.read('plan')
+    plan['allocation']['Local Retail']['Full Marathon'] = 40
+    plan['allocation']['Corporate']['Full Marathon'] = 100
+    doc_store.save('plan', plan, 0, 'seed')
+    app = AppTest.from_function(summary_pace_script, default_timeout=30)
+    app.run()
+    assert not app.exception, app.exception
+    messages = [m.value for m in [*app.success, *app.warning, *app.info]]
+    assert any(m.startswith('**Momentum: Local Retail**') for m in messages)
+    assert any(m.startswith('**Behind plan: Corporate**') for m in messages)
+    assert any(m.startswith('**Allocate Full Marathon**') for m in messages)
+    pace = next(d.value for d in app.dataframe if 'Projected at close' in d.value.columns)
+    assert pace.loc['Local Retail', 'Last 7 days'] == '21' and pace.loc['Local Retail', 'Status'] == 'Ahead of plan'
+
+
 SAMPLE_CSV = '''Registration Date,Current Age,Gender,Country,Category Name,Group/Corporate Name,Promo Code - Code
 01/09/2026 10:00,34,Male,Singapore,BYD Marathon (42.195KM),GROUP_REGISTRATION_Acme Batch 1 - Tan,
 02/09/2026 11:00,28,Female,Malaysia,adidas Half Marathon (21.1KM),,EARLY
