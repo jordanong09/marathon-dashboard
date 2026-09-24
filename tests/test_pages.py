@@ -266,3 +266,18 @@ def test_app_without_upload_opens_executive_summary(local_store):
     app.run()
     assert not app.exception, app.exception
     assert any('Executive Summary' in s.value for s in app.subheader)
+
+
+FEW_COUNTRIES_CSV = '''Registration Date,Current Age,Gender,Country,Category Name,Group/Corporate Name,Promo Code - Code
+01/09/2026 10:00,34,Male,Singapore,BYD Marathon (42.195KM),,
+02/09/2026 11:00,28,Female,Malaysia,adidas Half Marathon (21.1KM),,
+03/09/2026 12:00,41,Female,Japan,5km Fun Run,,
+'''
+
+
+def test_audience_page_with_five_or_fewer_countries(local_store, monkeypatch):
+    from pathlib import Path
+    monkeypatch.chdir(Path(__file__).resolve().parent.parent)
+    app = AppTest.from_function(full_app_script, args=('Audience & markets', FEW_COUNTRIES_CSV), default_timeout=120)
+    app.run()
+    assert not app.exception, app.exception
