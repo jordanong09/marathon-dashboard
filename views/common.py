@@ -94,7 +94,7 @@ def planning_context(data, promo_column):
         'close_date': docs['plan'].get('close_date', DEFAULT_CLOSE_DATE),
         'latest_date': dates.max().normalize() if len(dates) else pd.Timestamp.today().normalize(),
         'plan': plan_matrix(docs['plan']), 'capacity': capacity_series(docs['plan']),
-        'utilized': utilized_matrix(sales['orders'], comp['issuances'], attributed)}
+        'utilized': utilized_matrix(sales['orders'], attributed)}
 
 
 def capture_complimentary_tags(comp, data):

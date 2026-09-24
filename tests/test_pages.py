@@ -143,9 +143,12 @@ def test_complimentary_tags_are_captured_saved_and_tracked(local_store):
     saved = doc_store.read('complimentary')
     assert [p['name'] for p in saved['programmes']] == ['KOL Programme', 'Elite']
     assert len(saved['issuances']) == 1
-    overview = next(d.value for d in app.dataframe if 'Programme' in d.value.columns and 'Tags' in d.value.columns).set_index('Programme')
-    assert overview.loc['KOL Programme', ['Issued', 'Registered', 'Status']].tolist() == [2, 1, 'Awaiting registrations']
-    assert overview.loc['Elite', ['Issued', 'Registered', 'Status']].tolist() == [0, 2, 'No issuance recorded']
+    matrix = next(d.value for d in app.dataframe if 'Last 7 days' in d.value.columns and '5 km' in d.value.columns)
+    assert matrix.index.tolist() == ['Elite', 'KOL Programme', 'Total']
+    assert matrix.loc['Elite', ['5 km', 'Full Marathon', 'Total']].tolist() == [1, 1, 2]
+    assert matrix.loc['Total', 'Total'] == 3
+    log = next(d.value for d in app.dataframe if 'Slots given out' in d.value.columns).set_index('Programme')
+    assert log.loc['KOL Programme', ['Slots given out', 'Registered', 'Status']].tolist() == [2, 1, 'Awaiting registrations']
     rerun = AppTest.from_function(complimentary_script, default_timeout=30)
     rerun.run()
     assert not rerun.exception and not rerun.success
@@ -177,15 +180,17 @@ def test_campaigns_are_detected_dated_and_small_groups_can_be_added(local_store)
     saved = doc_store.read('campaigns')['campaigns']
     assert [(c['name'], sorted(c['codes']), c['auto']) for c in saved] == [('EARLY', ['EARLY10', 'EARLY20'], True)]
     overview = next(d.value for d in app.dataframe if 'Source' in d.value.columns).set_index('Campaign')
-    assert overview.loc['EARLY', ['Registrations', 'Last 7 days']].tolist() == [6, 4]
-    assert str(overview.loc['EARLY', 'First registered']) == '2026-05-01'
-    assert str(overview.loc['EARLY', 'Last registered']) == '2026-09-23'
+    assert overview.loc['EARLY', ['Code uses', 'Last 7 days']].tolist() == [6, 4]
+    assert str(overview.loc['EARLY', 'Start (first use)']) == '2026-05-01'
+    assert str(overview.loc['EARLY', 'End (last use)']) == '2026-09-23'
+    matrix = next(d.value for d in app.dataframe if '5 km' in d.value.columns and 'Last 7 days' in d.value.columns)
+    assert matrix.loc['EARLY', ['5 km', 'Total']].tolist() == [6, 6]
     detected = next(d.value for d in app.dataframe if 'Prefix' in d.value.columns)
     assert detected['Prefix'].tolist() == ['MEDIC'] and detected['Registrations'].tolist() == [2]
     app.multiselect(key='detected_chosen').select('MEDIC')
     app.button(key='detected_create').click().run()
     assert not app.exception, app.exception
-    assert [c['name'] for c in doc_store.read('campaigns')['campaigns']] == ['EARLY', 'MEDIC']
+    assert [c['name'] for c in doc_store.read('campaigns')['campaigns']] == ['EARLY', 'MEDIC1']
 
 
 def summary_pace_script():
@@ -281,3 +286,18 @@ def test_audience_page_with_five_or_fewer_countries(local_store, monkeypatch):
     app = AppTest.from_function(full_app_script, args=('Audience & markets', FEW_COUNTRIES_CSV), default_timeout=120)
     app.run()
     assert not app.exception, app.exception
+
+
+def test_campaigns_of_one_family_can_be_merged(local_store):
+    import doc_store
+    doc = doc_store.read('campaigns')
+    doc['campaigns'] = [{'id': f'c{n}', 'name': f'RGSIM{n}', 'type': 'shared', 'codes': [f'RGSIM{n}'], 'cap': None, 'start': None,
+        'end': None, 'notes': '', 'auto': True, 'prefix': f'RGSIM{n}'} for n in (1, 2)]
+    doc_store.save('campaigns', doc, 0, 'seed')
+    app = AppTest.from_function(page_script, args=('Campaigns', False), default_timeout=30)
+    app.run()
+    assert not app.exception, app.exception
+    app.button(key='merge_RGSIM').click().run()
+    assert not app.exception, app.exception
+    merged = doc_store.read('campaigns')['campaigns']
+    assert [(c['name'], c['codes']) for c in merged] == [('RGSIM', ['RGSIM1', 'RGSIM2'])]

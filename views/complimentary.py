@@ -1,4 +1,4 @@
-"""Complimentary programmes: tag links, issued slots and registrations."""
+"""Complimentary programmes: tag links and registrations, with an optional log of slots given out."""
 from __future__ import annotations
 
 import uuid
@@ -8,22 +8,11 @@ import pandas as pd
 import streamlit as st
 
 from planning.categories import PLANNING_CATEGORIES
-from planning.metrics import sum_quantities
-from views.common import needs_upload, quantity_editor, save_doc, target_strip
-
-
-def _registered(attributed, programme):
-    if attributed is None:
-        return None
-    rows = attributed[attributed['Group'].eq('Complimentary') & attributed['Subgroup'].eq(programme)]
-    return rows['Planning Category'].value_counts()
+from planning.metrics import registrations_by_subgroup, sum_quantities
+from views.common import needs_upload, quantity_editor, registration_dates, save_doc, target_strip
 
 
 def _status(issued, registered):
-    if registered is None:
-        return 'Upload registrations'
-    if not issued:
-        return 'No issuance recorded' if registered else ''
     if registered > issued:
         return 'Registered above issued'
     return 'Fully registered' if registered == issued else 'Awaiting registrations'
@@ -50,34 +39,40 @@ def render_complimentary(ctx):
     linked = {tag.casefold() for p in programmes for tag in p['tags']}
     unlinked = [tag for tag in found if tag.casefold() not in linked]
     all_tags = sorted({*found, *(tag for p in programmes for tag in p['tags'])}, key=str.casefold)
-    overview, manage, issue, activity = st.tabs(['Overview', 'Programmes', 'Record issuance', 'Activity'])
+    overview, manage, issue, activity = st.tabs(['Overview', 'Programmes', 'Slots given out (optional)', 'Activity'])
 
     with overview:
         if not programmes:
             st.info('No programmes yet. Upload the registration CSV: every COMPLIMENTARY_ tag in it is saved as a programme automatically.')
-        rows, detail = [], []
-        for p in programmes:
-            issued = sum_quantities([i for i in issuances if i['programme_id'] == p['id']])
-            registered = _registered(ctx['attributed'], p['name'])
-            reg_total = None if registered is None else int(registered.sum())
-            rows.append({'Programme': p['name'], 'Tags': ', '.join(p['tags']), 'Issued': int(issued.sum()), 'Registered': reg_total,
-                'Conversion %': reg_total / issued.sum() * 100 if reg_total is not None and issued.sum() else None,
-                'Status': _status(int(issued.sum()), reg_total)})
-            for category in PLANNING_CATEGORIES:
-                reg = None if registered is None else int(registered.get(category, 0))
-                if issued[category] or reg:
-                    detail.append({'Programme': p['name'], 'Category': category, 'Issued': int(issued[category]), 'Registered': reg,
-                        'Not yet registered': None if reg is None else max(int(issued[category]) - reg, 0), 'Status': _status(int(issued[category]), reg)})
-        if rows:
-            st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch',
-                column_config={'Conversion %': st.column_config.NumberColumn(format='%.0f%%')})
-            st.caption('Issued = slots recorded under Record issuance (counted as utilized in the Executive Summary). Registered = registrations carrying the programme tag.')
-            if detail:
-                st.markdown('#### By category')
-                st.dataframe(pd.DataFrame(detail), hide_index=True, width='stretch')
         if unlinked:
             st.warning(f'{len(unlinked)} complimentary tags in the registration data are not linked to a programme: {", ".join(unlinked)}')
-        needs_upload(ctx)
+        if not needs_upload(ctx):
+            table = registrations_by_subgroup(ctx['attributed'], registration_dates(data), 'Complimentary')
+            if table.empty:
+                st.info('No registrations in this upload carry a COMPLIMENTARY_ tag.')
+            else:
+                ranked = table.drop(index='Total')
+                a, b, c = st.columns(3)
+                a.metric('Complimentary registrations', f"{int(table.loc['Total', 'Total']):,}")
+                b.metric('Programmes with sign-ups', f'{len(ranked):,}')
+                c.metric('Most sign-ups', ranked.index[0], f"{int(ranked['Total'].iloc[0]):,} registrations", delta_color='off')
+                st.markdown('#### Registrations by programme and category')
+                st.dataframe(table, width='stretch')
+                st.caption('Complimentary utilization = registrations carrying the programme tag. Programmes are sorted by total sign-ups; '
+                    'Last 7 days ends on the latest registration date.')
+                st.download_button('Download programme × category table', table.to_csv(), 'complimentary-registrations.csv', 'text/csv')
+                if issuances:
+                    rows = []
+                    for p in programmes:
+                        issued = int(sum_quantities([i for i in issuances if i['programme_id'] == p['id']]).sum())
+                        if issued:
+                            registered = int(table.loc[p['name'], 'Total']) if p['name'] in table.index else 0
+                            rows.append({'Programme': p['name'], 'Slots given out': issued, 'Registered': registered,
+                                'Registered %': registered / issued * 100, 'Status': _status(issued, registered)})
+                    if rows:
+                        with st.expander('Slots given out vs registered (optional log)'):
+                            st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch',
+                                column_config={'Registered %': st.column_config.NumberColumn(format='%.0f%%')})
 
     with manage:
         with st.form('comp_new_programme', clear_on_submit=True):
@@ -115,7 +110,7 @@ def render_complimentary(ctx):
             st.info('Add a programme first.')
         else:
             with st.form('comp_new_issuance', clear_on_submit=True):
-                st.markdown('**Record slots given out**')
+                st.markdown('**Record slots given out** (optional — utilization counts registrations)')
                 programme_id = st.selectbox('Programme', list(names), format_func=names.get)
                 issued_on = st.date_input('Date issued', value=date.today(), max_value=date.today())
                 recipient = st.text_input('Recipient or batch', help='For example: "KOL batch 1" or a partner name.')
