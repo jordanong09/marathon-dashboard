@@ -116,6 +116,42 @@ def test_corporate_without_upload_says_so_and_allows_typed_links(local_store):
     assert saved['companies'][0]['aliases'] == ['SUNWAY MCL LTD', 'SUNWAY MCL']
 
 
+def complimentary_script():
+    import pandas as pd
+    from views.router import render_planning_page
+    data = pd.DataFrame({
+        'Grouped Category': ['5km', '5km', 'BYD Marathon'],
+        'Corporate Group': [None, None, None],
+        'Complimentary Programme': ['KOL', 'Elite', 'Elite'],
+        'Market': ['Singapore'] * 3,
+        'Promo': [''] * 3,
+    })
+    render_planning_page('Complimentary', data, 'Promo')
+
+
+def test_complimentary_tags_are_captured_saved_and_tracked(local_store):
+    import doc_store
+    comp = doc_store.read('complimentary')
+    comp['programmes'] = [{'id': 'p1', 'name': 'KOL Programme', 'tags': ['KOL'], 'notes': ''}]
+    comp['issuances'] = [{'id': 'i1', 'programme_id': 'p1', 'date': '2026-09-01', 'recipient': 'KOLs',
+        'quantities': {'5 km': 2}, 'notes': '', 'cancelled': False, 'cancel_reason': ''}]
+    doc_store.save('complimentary', comp, 0, 'seed')
+    app = AppTest.from_function(complimentary_script, default_timeout=30)
+    app.run()
+    assert not app.exception, app.exception
+    assert any('1 new complimentary programme(s) added: Elite' in s.value for s in app.success)
+    saved = doc_store.read('complimentary')
+    assert [p['name'] for p in saved['programmes']] == ['KOL Programme', 'Elite']
+    assert len(saved['issuances']) == 1
+    overview = next(d.value for d in app.dataframe if 'Programme' in d.value.columns and 'Tags' in d.value.columns).set_index('Programme')
+    assert overview.loc['KOL Programme', ['Issued', 'Registered', 'Status']].tolist() == [2, 1, 'Awaiting registrations']
+    assert overview.loc['Elite', ['Issued', 'Registered', 'Status']].tolist() == [0, 2, 'No issuance recorded']
+    rerun = AppTest.from_function(complimentary_script, default_timeout=30)
+    rerun.run()
+    assert not rerun.exception and not rerun.success
+    assert doc_store.read('complimentary')['revision'] == saved['revision']
+
+
 SAMPLE_CSV = '''Registration Date,Current Age,Gender,Country,Category Name,Group/Corporate Name,Promo Code - Code
 01/09/2026 10:00,34,Male,Singapore,BYD Marathon (42.195KM),GROUP_REGISTRATION_Acme Batch 1 - Tan,
 02/09/2026 11:00,28,Female,Malaysia,adidas Half Marathon (21.1KM),,EARLY
