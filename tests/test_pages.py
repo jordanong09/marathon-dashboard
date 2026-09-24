@@ -81,6 +81,11 @@ def test_corporate_utilization_auto_matches_and_lists_every_company(local_store)
     assert overview.loc['Acme Pte Ltd', 'Registered'] == 2
     assert overview.loc['Acme Pte Ltd', 'Released'] == 4
     assert overview.loc['Globex', 'Matching'] == 'No sales record'
+    grid = next(d.value for d in app.dataframe if d.value.index.name == 'Company')
+    assert grid.loc['Acme Pte Ltd', '5 km'] == '1 / 4'
+    assert grid.loc['Acme Pte Ltd', 'Full Marathon'] == '1 / 0'
+    unused = next(d.value for d in app.dataframe if 'Unused' in d.value.columns)
+    assert unused[['Company', 'Category', 'Unused']].values.tolist() == [['Acme Pte Ltd', '5 km', 3]]
     next(b for b in app.button if b.label.startswith('Confirm 1 suggested')).click().run()
     assert not app.exception, app.exception
     saved = json.loads((local_store / 'corporate_sales.json').read_text(encoding='utf-8'))
