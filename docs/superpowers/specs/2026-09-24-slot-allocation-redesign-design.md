@@ -61,7 +61,7 @@ Unlinked corporate and unconfigured comp registrations count as registered in th
 
 ### Legacy data
 
-Existing corporate orders store quantities under the 8 detailed category names. They are converted to planning categories **when read** by summing. Stored records are not rewritten until an order is next saved.
+Existing corporate orders store quantities under the 8 detailed category names. They are converted to planning categories **when read** by summing. The converted form is written back on the next Corporate Sales save; nothing is rewritten before then.
 
 ## 2. Screens
 
