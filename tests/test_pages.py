@@ -52,6 +52,41 @@ def test_create_campaign_and_add_shared_code(local_store):
     assert campaigns[0]['name'] == 'Early Bird' and campaigns[0]['codes'] == ['EARLY', 'EARLY2']
 
 
+def corporate_script():
+    import pandas as pd
+    from views.router import render_planning_page
+    data = pd.DataFrame({
+        'Grouped Category': ['BYD Marathon', '5km', '5km'],
+        'Corporate Group': ['ACME', 'ACME', 'Globex'],
+        'Complimentary Programme': [None, None, None],
+        'Market': ['Singapore'] * 3,
+        'Promo': [''] * 3,
+    })
+    render_planning_page('Corporate Sales', data, 'Promo')
+
+
+def test_corporate_utilization_auto_matches_and_lists_every_company(local_store):
+    import json
+    import sales_store
+    store = sales_store.new_store()
+    store['companies'] = [{'id': 'c1', 'name': 'Acme Pte Ltd', 'aliases': []}]
+    store['orders'] = [{'id': 'o1', 'company_id': 'c1', 'label': 'Initial order', 'workflow_version': 2, 'quantities': {'5 km': 4},
+        'milestones': {'Links disseminated': '2026-09-01'}, 'completed_steps': {}, 'invoice': '', 'invoice_amount': 0.0, 'cancelled': False, 'notes': ''}]
+    (local_store / 'corporate_sales.json').write_text(json.dumps(store), encoding='utf-8')
+    app = AppTest.from_function(corporate_script, default_timeout=30)
+    app.run()
+    assert not app.exception, app.exception
+    overview = next(d.value for d in app.dataframe if 'Matching' in d.value.columns).set_index('Company')
+    assert overview.loc['Acme Pte Ltd', 'Matching'] == 'Auto-matched'
+    assert overview.loc['Acme Pte Ltd', 'Registered'] == 2
+    assert overview.loc['Acme Pte Ltd', 'Released'] == 4
+    assert overview.loc['Globex', 'Matching'] == 'No sales record'
+    next(b for b in app.button if b.label.startswith('Confirm 1 suggested')).click().run()
+    assert not app.exception, app.exception
+    saved = json.loads((local_store / 'corporate_sales.json').read_text(encoding='utf-8'))
+    assert saved['companies'][0]['aliases'] == ['ACME']
+
+
 SAMPLE_CSV = '''Registration Date,Current Age,Gender,Country,Category Name,Group/Corporate Name,Promo Code - Code
 01/09/2026 10:00,34,Male,Singapore,BYD Marathon (42.195KM),GROUP_REGISTRATION_Acme Batch 1 - Tan,
 02/09/2026 11:00,28,Female,Malaysia,adidas Half Marathon (21.1KM),,EARLY

@@ -27,9 +27,12 @@ def render_corporate_sales(ctx):
     names={c['id']:c['name'] for c in companies}
     available=[] if data.empty else sorted(data['Corporate Group'].dropna().astype(str).unique())
     matched={a.casefold() for c in companies for a in c['aliases']}
-    missing=[a for a in available if a.casefold() not in matched]
+    links=ctx['corporate_links']
+    linked_names={c['id']:[n for n,(cid,_) in links.items() if cid==c['id']] for c in companies}
+    suggested={n:cid for n,(cid,how) in links.items() if how=='auto'}
+    missing=[a for a in available if a not in links]
     if missing:
-        st.warning(f'{len(missing)} companies in the registration sheet have no linked sales record. Add or match them under Companies.')
+        st.warning(f'{len(missing)} companies in the registration sheet have no sales record. They are listed in Company utilization; add them under Companies to track their orders.')
         with st.expander('Companies awaiting a sales record'):
             st.write(missing)
     tab_names=['Overview','Companies','New order / top-up','Orders in progress','Company utilization','Daily activity']
@@ -53,6 +56,13 @@ def render_corporate_sales(ctx):
         if summary['Available to sell'].lt(0).any(): st.warning('Reserved places exceed the Corporate plan in one or more categories. Ask the executive to review the plan before taking further orders.')
         st.caption('Group target comes from the Corporate row in Plan Allocation.')
     with tabs[1]:
+        if suggested:
+            st.info(f'{len(suggested)} registration names match a sales company by name and are already counted. Confirm to save them as permanent links.')
+            st.dataframe(pd.DataFrame({'Registration name':list(suggested),'Sales company':[names[c] for c in suggested.values()]}),hide_index=True,width='stretch')
+            if st.button(f'Confirm {len(suggested)} suggested matches'):
+                changed=copy.deepcopy(records)
+                for n,cid in suggested.items(): next(c for c in changed['companies'] if c['id']==cid)['aliases'].append(n)
+                commit(changed,f'{len(suggested)} registration names linked')
         with st.form('sales_company'):
             name=st.text_input('Company name')
             aliases=st.multiselect('Names used in registration uploads',available)
@@ -133,18 +143,48 @@ def render_corporate_sales(ctx):
             st.caption('Known dates must follow chronological order. Missing historical dates are flagged in amber. Links disseminated marks operational completion; unresolved evidence remains flagged. Saving records does not send links or process payments.')
     with tabs[4]:
         if data.empty: st.info('Upload a registration master sheet to calculate utilization. Saved orders remain available without it.')
+        counts=data['Corporate Group'].dropna().astype(str).value_counts() if not data.empty else pd.Series(dtype=int)
+        nan=float('nan')
+        overview=[]
         for company in companies:
             company_orders=[o for o in orders if o['company_id']==company['id']]
-            actual=data.iloc[0:0] if data.empty else data[data['Corporate Group'].fillna('').str.casefold().isin([a.casefold() for a in company['aliases']])]
+            totals=pd.DataFrame(summarize(company_orders,categories))[['Reserved','Paid','Released']].sum()
+            linked=linked_names[company['id']]
+            registered=nan if data.empty else float(sum(counts.get(n,0) for n in linked))
+            matching='Not matched' if not linked else ('Auto-matched' if {links[n][1] for n in linked}=={'auto'} else 'Linked')
+            overview.append({'Company':company['name'],'Matching':matching,'Registration names':', '.join(linked),'Orders':len(company_orders),
+                'Reserved':int(totals.Reserved),'Paid':int(totals.Paid),'Released':int(totals.Released),'Registered':registered,
+                'Released not yet registered':totals.Released-registered,'Utilization %':registered/totals.Released*100 if totals.Released else nan})
+        for name in missing:
+            overview.append({'Company':name,'Matching':'No sales record','Registration names':name,'Orders':0,'Reserved':0,'Paid':0,'Released':0,
+                'Registered':float(counts.get(name,0)),'Released not yet registered':nan,'Utilization %':nan})
+        if overview:
+            frame=pd.DataFrame(overview).sort_values(['Released','Registered'],ascending=False,na_position='last')
+            with_record=frame[frame.Matching.ne('No sales record')]
+            released=with_record.Released.sum(); registered=with_record.Registered.sum(min_count=1)
+            a,b,c,d=st.columns(4)
+            a.metric('Companies with sales records',len(with_record))
+            b.metric('Registration companies without a sales record',len(missing))
+            c.metric('Registered (companies with sales records)','—' if pd.isna(registered) else f'{int(registered):,}')
+            d.metric('Utilization of released places','—' if pd.isna(registered) or not released else f'{registered/released*100:.0f}%')
+            st.dataframe(frame,hide_index=True,width='stretch',column_config={'Registered':st.column_config.NumberColumn(format='%d'),
+                'Released not yet registered':st.column_config.NumberColumn(format='%d'),'Utilization %':st.column_config.NumberColumn(format='%.0f%%')})
+            st.download_button('Download company utilization',frame.to_csv(index=False),'corporate-utilization.csv','text/csv')
+            st.caption('Matching: Linked = saved registration name · Auto-matched = same company name ignoring case, punctuation and suffixes such as Pte/Ltd/Limited (confirm under Companies) · No sales record = registrations under a company with no record in Corporate Sales.')
+        st.markdown('#### Company detail')
+        for company in companies:
+            company_orders=[o for o in orders if o['company_id']==company['id']]
+            linked=linked_names[company['id']]
+            actual=data.iloc[0:0] if data.empty else data[data['Corporate Group'].fillna('').astype(str).isin(linked)]
             rows=pd.DataFrame(summarize(company_orders,categories))
             rows['Registered']=rows.Category.map(actual['Grouped Category'].map(to_planning_category).value_counts() if not actual.empty else {}).fillna(0).astype(int)
-            if data.empty or not company['aliases']:
+            if data.empty or not linked:
                 rows['Registered']=float('nan')
             rows['Unredeemed released places']=rows.Released-rows.Registered
             rows['Utilization %']=rows.Registered/rows.Released.replace(0,float('nan'))*100
             complete=sum(stage(o)=='✓ Complete' for o in company_orders)
             with st.expander(f"{company['name']} · {len(company_orders)} orders · {complete} complete · {rows.Released.sum():,} released places"):
-                if not company['aliases']: st.warning('Registration-name matching has not been set; utilization is not yet verified.')
+                if not linked: st.warning('No registration names match this company yet. Link them under Companies; utilization is not yet verified.')
                 if (rows.Registered>rows.Released).any(): st.warning('Registrations exceed disseminated allocations. Check order progress and company matching.')
                 st.dataframe(rows,hide_index=True,width='stretch')
                 for o in company_orders:
