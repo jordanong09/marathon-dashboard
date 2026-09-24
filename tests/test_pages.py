@@ -1,0 +1,99 @@
+import pytest
+from streamlit.testing.v1 import AppTest
+
+PAGES = ['Executive Summary', 'Plan Allocation', 'Corporate Sales', 'Complimentary', 'Campaigns']
+
+
+def page_script(page, with_data):
+    import pandas as pd
+    from views.router import render_planning_page
+    data = None
+    if with_data:
+        data = pd.DataFrame({
+            'Grouped Category': ['BYD Marathon', '5km', 'adidas Half Marathon', 'Kids Dash Non-Competitive 600m'],
+            'Corporate Group': ['Acme', None, None, None],
+            'Complimentary Programme': [None, 'KOL', None, None],
+            'Market': ['Singapore', 'Singapore', 'International', 'Singapore'],
+            'Promo': ['', '', 'EARLY', ''],
+            'Registration Date Only': pd.to_datetime(['2026-09-01'] * 4),
+        })
+    render_planning_page(page, data, 'Promo' if with_data else None)
+
+
+@pytest.mark.parametrize('page', PAGES)
+@pytest.mark.parametrize('with_data', [False, True])
+def test_page_renders(page, with_data, local_store):
+    app = AppTest.from_function(page_script, args=(page, with_data), default_timeout=30)
+    app.run()
+    assert not app.exception, app.exception
+
+
+def test_plan_save_persists_and_feeds_summary(local_store):
+    import doc_store
+    app = AppTest.from_function(page_script, args=('Plan Allocation', False), default_timeout=30)
+    app.run()
+    next(b for b in app.button if b.label == 'Save plan').click().run()
+    assert not app.exception, app.exception
+    assert doc_store.read('plan')['revision'] == 1
+    assert any('Plan saved' in s.value for s in app.success)
+
+
+def test_create_campaign_and_add_shared_code(local_store):
+    import doc_store
+    app = AppTest.from_function(page_script, args=('Campaigns', True), default_timeout=30)
+    app.run()
+    next(t for t in app.text_input if t.label == 'Campaign name').input('Early Bird')
+    next(b for b in app.button if b.label == 'Create campaign').click().run()
+    assert not app.exception, app.exception
+    next(t for t in app.text_area if t.label == 'Add codes, one per line').input('EARLY\nEARLY2')
+    next(b for b in app.button if b.label == 'Add codes').click().run()
+    assert not app.exception, app.exception
+    campaigns = doc_store.read('campaigns')['campaigns']
+    assert campaigns[0]['name'] == 'Early Bird' and campaigns[0]['codes'] == ['EARLY', 'EARLY2']
+
+
+SAMPLE_CSV = '''Registration Date,Current Age,Gender,Country,Category Name,Group/Corporate Name,Promo Code - Code
+01/09/2026 10:00,34,Male,Singapore,BYD Marathon (42.195KM),GROUP_REGISTRATION_Acme Batch 1 - Tan,
+02/09/2026 11:00,28,Female,Malaysia,adidas Half Marathon (21.1KM),,EARLY
+03/09/2026 12:00,41,Female,Singapore,5km Fun Run,COMPLIMENTARY_KOL,
+04/09/2026 13:00,9,Male,Singapore,Kids Dash Non-Competitive 600m,,
+05/09/2026 14:00,30,Male,Japan,Standard Chartered 10km,,MEDIC1
+06/09/2026 09:00,45,Female,Australia,BYD Marathon Crew Challenge,,
+07/09/2026 09:30,37,Male,India,5km Fun Run,,
+08/09/2026 10:30,52,Female,Indonesia,adidas Half Marathon (21.1KM),,
+09/09/2026 11:30,26,Male,Philippines,Standard Chartered 10km,,
+10/09/2026 12:30,12,Female,Singapore,Kids Dash Competitive 1.6KM,,
+'''
+
+
+def full_app_script(page, csv_text):
+    import runpy
+    from pathlib import Path
+    import streamlit as st
+    from streamlit.proto.Common_pb2 import FileURLs
+    from streamlit.runtime.uploaded_file_manager import UploadedFile, UploadedFileRec
+
+    upload = UploadedFile(UploadedFileRec('sample', 'registrations.csv', 'text/csv', csv_text.encode()), FileURLs())
+    st.session_state.setdefault('workspace_page', page)
+    st.sidebar.file_uploader = lambda *args, **kwargs: upload
+    runpy.run_path(str(Path('app.py').resolve()), run_name='__main__')
+
+
+@pytest.mark.parametrize('page', PAGES + ['Overview', 'Daily registration', 'Groups & complimentary', 'Audience & markets', 'Reports & data'])
+def test_full_app_with_upload(page, local_store, monkeypatch):
+    from pathlib import Path
+    monkeypatch.chdir(Path(__file__).resolve().parent.parent)
+    app = AppTest.from_function(full_app_script, args=(page, SAMPLE_CSV), default_timeout=120)
+    app.run()
+    assert not app.exception, app.exception
+    assert not app.error, [e.value for e in app.error]
+    assert app.subheader, 'page content did not render'
+    if page in PAGES:
+        assert app.subheader[0].value == page
+
+
+def test_app_without_upload_opens_executive_summary(local_store):
+    app = AppTest.from_file('../app.py', default_timeout=60)
+    app.run()
+    assert not app.exception, app.exception
+    assert any('Executive Summary' in s.value for s in app.subheader)
