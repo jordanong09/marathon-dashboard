@@ -18,11 +18,11 @@ Clean deployment copy for a **private, company-owned GitHub repository**.
 ## What happens on each registration upload
 The CSV is never stored. Each upload is compared with the saved records:
 - New `COMPLIMENTARY_` tags are saved as complimentary programmes (or linked to a programme with the same name).
-- Promo codes that no campaign claims are grouped by stem (EARLY10, EARLY20 → EARLY); groups with 5+ registrations are saved as automatic campaigns and later codes with the same stem join them. Smaller groups wait under Campaigns → Detected codes.
+- Promo codes that no campaign claims are grouped into families by their leading letters (RGSIM1, RG-SIM-2 → RGSIM); a lone code keeps its own name (EARLY10). Groups with 5+ registrations are saved as automatic campaigns and later codes of the same family join them; smaller groups wait under Campaigns → Detected codes. Campaigns already saved separately but sharing a family are offered as a one-click merge.
 - Company names in `GROUP_REGISTRATION_` rows are matched to Corporate Sales companies, ignoring case, punctuation, bracketed notes and suffixes such as Pte/Ltd; confirm matches under Corporate Sales → Companies.
 Saved programmes, campaigns, links, orders and issuances are never removed by an upload.
 
-The Executive Summary turns the plan, utilization and the last 14 days of activity into pace to close and recommendations. The registration close date is set in Plan Allocation.
+Utilized means places reserved on orders for Corporate, and registrations for Complimentary, Campaign and Retail. Complimentary and Campaigns each show a programme/campaign × race category table of registrations, sorted by sign-ups. The Executive Summary turns the plan, utilization and the last 14 days of activity into pace to close and recommendations. The registration close date is set in Plan Allocation.
 - `docs/superpowers/`: design spec and implementation plan for the slot allocation redesign.
 - `.streamlit/config.toml`: theme and Streamlit settings.
 - `requirements.txt`: dependencies matched to the tested application.

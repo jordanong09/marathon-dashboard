@@ -26,9 +26,9 @@ def render_executive_summary(ctx):
     if not plan.to_numpy().any():
         st.info('No group allocations saved yet. Open Plan Allocation to set the plan.')
     if ctx['data'] is None:
-        st.caption('Campaign and retail utilization come from registrations. Upload the registration CSV in the sidebar; until then they show — and are left out of totals.')
+        st.caption('Complimentary, campaign and retail utilization come from registrations. Upload the registration CSV in the sidebar; until then they show — and are left out of totals.')
 
-    events = build_events(ctx['attributed'], registration_dates(ctx['data']), ctx['docs']['corporate']['orders'], ctx['docs']['complimentary']['issuances'])
+    events = build_events(ctx['attributed'], registration_dates(ctx['data']), ctx['docs']['corporate']['orders'])
     group_pace = pace_table(plan, utilized, events, ctx['latest_date'], ctx['close_date'])
     category_pace = pace_table(plan, utilized, events, ctx['latest_date'], ctx['close_date'], by_category=True)
     days_left = max((pd.Timestamp(ctx['close_date']) - ctx['latest_date']).days, 0)
@@ -41,15 +41,15 @@ def render_executive_summary(ctx):
     st.markdown('### Pace to close')
     shown = group_pace.drop(columns=['Plan', 'Utilized', 'Remaining'])
     st.dataframe(style_numbers(shown, {'Week on week %': pct, 'Per day': _one_decimal, 'Needed per day': _one_decimal, 'Status': str}), width='stretch')
-    st.caption('Last 7 / Previous 7 days: places reserved (Corporate, by order-form date), issued (Complimentary, by issue date) or registered '
-        '(Campaign and Retail). Projected at close = utilized + current daily pace × days left.')
+    st.caption('Last 7 / Previous 7 days: places reserved (Corporate, by order-form date) or registered (every other group). '
+        'Projected at close = utilized + current daily pace × days left.')
     with st.expander('Pace by group and category'):
         detail = category_pace[category_pace['Plan'].gt(0) | category_pace['Last 7 days'].gt(0)]
         st.dataframe(style_numbers(detail, {'Week on week %': pct, 'Per day': _one_decimal, 'Needed per day': _one_decimal, 'Status': str}), width='stretch')
 
     st.markdown('### By group')
     st.dataframe(style_numbers(summary, {'% utilized': pct}), width='stretch')
-    st.caption('Utilized: Corporate = places reserved on active orders · Complimentary = slots issued · Campaign and Retail = registrations.')
+    st.caption('Utilized: Corporate = places reserved on active orders · Complimentary, Campaign and Retail = registrations.')
 
     st.markdown('### By group and category')
     view = st.segmented_control('Show', ['Plan', 'Utilized', 'Remaining'], default='Remaining', key='summary_view') or 'Remaining'

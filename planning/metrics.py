@@ -5,7 +5,7 @@ import pandas as pd
 
 from planning.categories import GROUPS, PLANNING_CATEGORIES, UNMAPPED, convert_quantities
 
-REGISTRATION_GROUPS = ['Campaign', 'Local Retail', 'International Retail']
+REGISTRATION_GROUPS = ['Complimentary', 'Campaign', 'Local Retail', 'International Retail']
 LEVELS = ['error', 'warning', 'info']
 
 
@@ -44,11 +44,10 @@ def registered_matrix(attributed):
     return counts.reindex(index=GROUPS, columns=PLANNING_CATEGORIES, fill_value=0).astype(float)
 
 
-def utilized_matrix(corporate_orders, issuances, attributed):
-    """Corporate = reserved, Complimentary = issued, others = registrations (NaN without an upload)."""
+def utilized_matrix(corporate_orders, attributed):
+    """Corporate = places reserved on orders; every other group = registrations (NaN without an upload)."""
     matrix = empty_matrix(float('nan'))
     matrix.loc['Corporate'] = sum_quantities(corporate_orders)
-    matrix.loc['Complimentary'] = sum_quantities(issuances)
     if attributed is not None:
         matrix.loc[REGISTRATION_GROUPS] = registered_matrix(attributed).loc[REGISTRATION_GROUPS]
     return matrix
@@ -61,6 +60,30 @@ def group_summary(plan, utilized):
     summary['Remaining'] = summary.Plan - summary.Utilized
     summary['% utilized'] = summary.Utilized / summary.Plan.replace(0, float('nan')) * 100
     return summary
+
+
+def registrations_by_subgroup(attributed, dates, group):
+    """Registrations per subgroup (programme, campaign…) × planning category, largest first, with a Total row.
+
+    Also Last 7 days (the 7 days ending on the latest registration date) and first/last registration dates.
+    """
+    columns = PLANNING_CATEGORIES + ['Total', 'Last 7 days', 'First registered', 'Last registered']
+    frame = pd.DataFrame({'Subgroup': attributed['Subgroup'].to_numpy(), 'Category': attributed['Planning Category'].to_numpy(),
+        'Date': pd.to_datetime(pd.Series(dates).to_numpy())}, index=range(len(attributed)))
+    latest = frame['Date'].max()
+    frame = frame[(attributed['Group'].to_numpy() == group) & frame['Category'].ne(UNMAPPED).to_numpy()]
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    table = pd.crosstab(frame['Subgroup'], frame['Category']).reindex(columns=PLANNING_CATEGORIES, fill_value=0)
+    table['Total'] = table.sum(axis=1)
+    table['Last 7 days'] = frame[frame['Date'] >= latest - pd.Timedelta(days=6)].groupby('Subgroup').size().reindex(table.index).fillna(0).astype(int)
+    table = table.sort_values(['Total'], ascending=False, kind='stable')
+    table.loc['Total'] = table.sum()
+    dated = frame.groupby('Subgroup')['Date'].agg(['min', 'max']).map(lambda value: None if pd.isna(value) else value.date())
+    table['First registered'] = dated['min'].reindex(table.index)
+    table['Last registered'] = dated['max'].reindex(table.index)
+    table.index.name = None
+    return table[columns]
 
 
 def unmatched_codes(attributed):

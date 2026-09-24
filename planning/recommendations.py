@@ -12,16 +12,15 @@ ORDER_DATE = 'Order form received from company'
 DEFAULT_CLOSE_DATE = '2026-09-30'
 
 
-def build_events(attributed, dates, orders, issuances):
-    """Dated units of utilization: registrations (campaign/retail), reserved places (corporate), issued slots (complimentary)."""
+def build_events(attributed, dates, orders):
+    """Dated units of utilization: reserved places for Corporate (order-form date), registrations for every other group."""
     frames = []
     if attributed is not None and not attributed.empty:
         registered = pd.DataFrame({'Group': attributed['Group'].to_numpy(), 'Planning Category': attributed['Planning Category'].to_numpy(),
             'Date': pd.to_datetime(dates.to_numpy()), 'Places': 1})
         frames.append(registered[registered['Group'].isin(REGISTRATION_GROUPS) & registered['Planning Category'].ne(UNMAPPED)])
     rows = []
-    sources = [('Corporate', orders, lambda o: o.get('milestones', {}).get(ORDER_DATE) or o.get('created_at')),
-        ('Complimentary', issuances, lambda i: i.get('date'))]
+    sources = [('Corporate', orders, lambda o: o.get('milestones', {}).get(ORDER_DATE) or o.get('created_at'))]
     for group, records, date_of in sources:
         for record in records:
             if record.get('cancelled'):

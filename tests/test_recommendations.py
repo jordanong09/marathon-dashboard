@@ -22,15 +22,14 @@ def registrations(group, category, dates):
     return pd.DataFrame({'Group': group, 'Planning Category': category, 'Date': pd.to_datetime(dates), 'Places': 1})
 
 
-def test_build_events_uses_order_and_issue_dates_and_skips_cancelled():
-    attributed = pd.DataFrame({'Group': ['Local Retail', 'Corporate', 'Campaign'], 'Planning Category': ['5 km', '5 km', 'Unmapped']})
-    dates = pd.Series(pd.to_datetime(['2026-09-20', '2026-09-20', '2026-09-20']))
+def test_build_events_uses_order_dates_and_registrations_and_skips_cancelled():
+    attributed = pd.DataFrame({'Group': ['Local Retail', 'Corporate', 'Campaign', 'Complimentary'], 'Planning Category': ['5 km', '5 km', 'Unmapped', '10 km']})
+    dates = pd.Series(pd.to_datetime(['2026-09-20', '2026-09-20', '2026-09-20', '2026-09-19']))
     orders = [{'quantities': {'BYD Marathon': 4}, 'cancelled': False, 'milestones': {'Order form received from company': '2026-09-18'}},
         {'quantities': {'5 km': 9}, 'cancelled': True, 'milestones': {}}]
-    issuances = [{'quantities': {'10 km': 3}, 'cancelled': False, 'date': '2026-09-19'}]
-    events = build_events(attributed, dates, orders, issuances)
+    events = build_events(attributed, dates, orders)
     assert sorted(map(tuple, events[['Group', 'Planning Category', 'Places']].values.tolist())) == [
-        ('Complimentary', '10 km', 3), ('Corporate', 'Full Marathon', 4), ('Local Retail', '5 km', 1)]
+        ('Complimentary', '10 km', 1), ('Corporate', 'Full Marathon', 4), ('Local Retail', '5 km', 1)]
 
 
 def test_pace_table_projects_to_close_from_last_seven_complete_days():
