@@ -1,7 +1,9 @@
 from datetime import timedelta
+from functools import partial
 import csv
 import base64
 from admin_dashboard import style_dashboard, workspace_navigation, render_chart
+from planning.capacity_segments import classify_capacity_segments
 from planning.categories import PLANNING_CATEGORIES
 from views.router import PLANNING_PAGES, render_planning_page
 import re
@@ -1876,44 +1878,6 @@ CAPACITY_GROUPS = {
 }
 
 
-def classify_capacity_segment(row):
-    """
-    Assign one registration row to a capacity-table segment.
-    Order matters: the more specific checks (unsuccessful medic,
-    SC staff) must run before the generic corporate/public
-    fallbacks, or they would be absorbed into "Corporate
-    Registration" or "Local"/"International".
-
-    The split between "Corporate Registration" and a possible
-    future "Standard Chartered Corporate Buy" row is intentionally
-    on hold — all non-staff Group Registration rows currently roll
-    up into "Corporate Registration".
-    """
-    corporate_name = row.get("Corporate Group") or ""
-    group_corporate_raw = row.get("_group_corporate_raw") or ""
-    category_raw = row.get("_category_raw") or ""
-
-    if "UNSFUL_MEDIC" in str(group_corporate_raw).upper():
-        return "Unsuccessful Medic Entry"
-
-    if "Transfer Entry" in str(category_raw):
-        return "Transfer Entry"
-
-    if row["Registration Type"] == "Group Registration":
-        if "Standard_Chartered_Staff" in str(group_corporate_raw):
-            return "Standard Chartered Staff Entry"
-
-        return "Corporate Registration"
-
-    if row["Registration Type"] == "Complimentary":
-        return "Complimentary Entry"
-
-    if row["Market"] == "Singapore":
-        return "Local"
-
-    return "International"
-
-
 def compute_capacity_segments(
     data, group_corporate_column=None, category_column=None
 ):
@@ -1941,9 +1905,7 @@ def compute_capacity_segments(
         data[category_column] if category_column else ""
     )
 
-    valid["_segment"] = valid.apply(
-        classify_capacity_segment, axis=1
-    )
+    valid["_segment"] = classify_capacity_segments(valid)
 
     return valid
 
@@ -4930,7 +4892,7 @@ complimentary_category_counts, complimentary_category_display = (
 )
 
 if page == "Reports & data":
-    excel_report_bytes = create_excel_report(
+    excel_report_bytes = partial(create_excel_report, 
         original_data=source_df,
         filtered_data=filtered_df,
         category_summary=category_summary,
@@ -5036,7 +4998,7 @@ if not overall_tracker_daily.empty:
 weekly_summary_table = create_weekly_summary_table(filtered_df)
 
 if page == "Reports & data":
-    final_report_bytes = create_final_report(
+    final_report_bytes = partial(create_final_report, 
         country_market_table=country_market_table,
         nationality_market_table=nationality_market_table,
         age_gender_table=age_gender_table,
