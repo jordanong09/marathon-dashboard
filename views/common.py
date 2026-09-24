@@ -90,8 +90,15 @@ def _negative(value):
     return 'color:#B42318;background-color:#FFF0ED' if isinstance(value, (int, float)) and pd.notna(value) and value < 0 else ''
 
 
-def style_numbers(frame):
-    return frame.style.format('{:,.0f}', na_rep='—').map(_negative)
+def style_numbers(frame, formatters=None):
+    """Display text (st.dataframe shows missing values as 'None' otherwise) with negatives in red."""
+    formatters = formatters or {}
+    text = frame.apply(lambda column: column.map(formatters.get(column.name, fmt)))
+    return text.style.apply(lambda _: frame.map(_negative), axis=None)
+
+
+def pct(value):
+    return '—' if pd.isna(value) else f'{value:.0f}%'
 
 
 def target_strip(ctx, group):

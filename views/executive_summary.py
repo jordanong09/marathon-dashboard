@@ -5,7 +5,7 @@ import pandas as pd
 import streamlit as st
 
 from planning.metrics import gaps, group_summary
-from views.common import fmt, style_numbers
+from views.common import fmt, pct, style_numbers
 
 
 def render_executive_summary(ctx):
@@ -24,8 +24,7 @@ def render_executive_summary(ctx):
         st.caption('Campaign and retail utilization come from registrations. Upload the registration CSV in the sidebar; until then they show — and are left out of totals.')
 
     st.markdown('### By group')
-    st.dataframe(summary.style.format({'Plan': '{:,.0f}', 'Utilized': '{:,.0f}', 'Remaining': '{:,.0f}', '% utilized': '{:.0f}%'},
-        na_rep='—').map(lambda v: 'color:#B42318' if isinstance(v, float) and v < 0 else '', subset=['Remaining']), width='stretch')
+    st.dataframe(style_numbers(summary, {'% utilized': pct}), width='stretch')
     st.caption('Utilized: Corporate = places reserved on active orders · Complimentary = slots issued · Campaign and Retail = registrations.')
 
     st.markdown('### By group and category')
