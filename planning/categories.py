@@ -1,6 +1,8 @@
 """Six planning categories and conversion from registration categories."""
 from __future__ import annotations
 
+import re
+
 PLANNING_CATEGORIES = ['Full Marathon', 'Half Marathon', '10 km', '5 km', 'Kids 1.6 km', 'Kids 600 m']
 GROUPS = ['Corporate', 'Complimentary', 'Campaign', 'Local Retail', 'International Retail']
 UNMAPPED = 'Unmapped'
@@ -19,10 +21,23 @@ SOURCE_TO_PLANNING = {
 
 
 def to_planning_category(name):
-    """Map a grouped registration category (or a planning category) to a planning category."""
+    """Map a grouped registration category (or a planning category) to a planning category.
+
+    Annotated names keep their category: 'Kids 1.6 km — subtype unconfirmed' -> 'Kids 1.6 km'.
+    """
     if name in PLANNING_CATEGORIES:
         return name
-    return SOURCE_TO_PLANNING.get(name, UNMAPPED)
+    if name in SOURCE_TO_PLANNING:
+        return SOURCE_TO_PLANNING[name]
+    if not isinstance(name, str):
+        return UNMAPPED
+    base = re.split(r'\s+[—–-]\s+|\s*\(', name, maxsplit=1)[0].strip()
+    if base != name and (base in PLANNING_CATEGORIES or base in SOURCE_TO_PLANNING):
+        return to_planning_category(base)
+    text = name.casefold()
+    if 'kid' in text and '1.6' in text:
+        return 'Kids 1.6 km'
+    return UNMAPPED
 
 
 def convert_quantities(quantities):
