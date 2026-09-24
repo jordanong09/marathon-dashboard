@@ -8,7 +8,30 @@ import pandas as pd
 import streamlit as st
 from sales_store import stage, summarize, MILESTONES, milestone_date, completed, review_flags, waiting_days
 from planning.categories import PLANNING_CATEGORIES, convert_quantities, to_planning_category
+from planning.corporate_utilization import company_category_usage, unused_places
 from views.common import save_doc, target_strip
+
+USAGE_TONES={'low':'background-color:#FDE7E4;color:#9F1D12','part':'background-color:#FFF4DB;color:#7A4A00','full':'background-color:#E6F4EA;color:#1E6B34','':''}
+
+def category_grid(usage,basis,gaps_only):
+    """Company × category cells 'registered / places', coloured by how much is used."""
+    def tone(registered,places):
+        if pd.isna(registered): return ''
+        if registered>places: return 'part'
+        share=registered/places if places else 1
+        return 'full' if share>=1 else 'part' if share>=.5 else 'low'
+    usage=usage.copy()
+    totals=usage.groupby('Company',sort=False)[[basis,'Registered']].sum(min_count=1).reset_index().assign(Category='Total')
+    usage=pd.concat([usage,totals],ignore_index=True)
+    usage['Cell']=[('–' if pd.isna(r) else f'{int(r):,}')+f' / {int(p):,}' for r,p in zip(usage.Registered,usage[basis])]
+    usage['Tone']=[tone(r,p) for r,p in zip(usage.Registered,usage[basis])]
+    columns=[c for c in PLANNING_CATEGORIES if c in set(usage.Category)]+['Total']
+    text=usage.pivot(index='Company',columns='Category',values='Cell').reindex(columns=columns).fillna('')
+    tones=usage.pivot(index='Company',columns='Category',values='Tone').reindex(columns=columns).fillna('')
+    if gaps_only:
+        keep=tones.drop(columns='Total').isin(['low','part']).any(axis=1)
+        text,tones=text[keep],tones[keep]
+    return text.style.apply(lambda _: tones.map(USAGE_TONES.get),axis=None)
 
 def render_corporate_sales(ctx):
     data=ctx['data'] if ctx['data'] is not None else pd.DataFrame(columns=['Corporate Group','Grouped Category'])
@@ -176,6 +199,21 @@ def render_corporate_sales(ctx):
                 'Released not yet registered':st.column_config.NumberColumn(format='%d'),'Utilization %':st.column_config.NumberColumn(format='%.0f%%')})
             st.download_button('Download company utilization',frame.to_csv(index=False),'corporate-utilization.csv','text/csv')
             st.caption('Matching: Linked = saved registration name · Auto-matched = same company name ignoring case, punctuation and suffixes such as Pte/Ltd/Limited (confirm under Companies) · No sales record = registrations under a company with no record in Corporate Sales.')
+        usage=company_category_usage(companies,orders,linked_names,None if data.empty else data)
+        if not usage.empty:
+            st.markdown('#### By category')
+            basis=(st.segmented_control('Compare registrations with',['Reserved (bought)','Released (links sent)'],default='Reserved (bought)',key='usage_basis') or 'Reserved (bought)').split()[0]
+            gaps_only=st.checkbox('Only companies with unused places',value=True,key='usage_gaps_only',disabled=data.empty)
+            st.dataframe(category_grid(usage,basis,gaps_only and not data.empty),width='stretch')
+            st.caption(f"Each cell: registered / {basis.lower()} places. Red = under 50% used · amber = partly used, or more registrations than places · green = fully used · blank = no places in that category.")
+            if not data.empty:
+                unused=unused_places(usage,basis)
+                st.markdown('#### Unused places')
+                if unused.empty: st.success('Every company has registered all of its places.')
+                else:
+                    st.caption(f'{int(unused.Unused.sum()):,} {basis.lower()} places not yet registered, largest gaps first.')
+                    st.dataframe(unused,hide_index=True,width='stretch',column_config={'Utilization %':st.column_config.NumberColumn(format='%.0f%%')})
+                    st.download_button('Download unused places',unused.to_csv(index=False),'corporate-unused-places.csv','text/csv')
         st.markdown('#### Company detail')
         for company in companies:
             company_orders=[o for o in orders if o['company_id']==company['id']]
