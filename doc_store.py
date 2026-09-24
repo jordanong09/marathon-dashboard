@@ -13,6 +13,7 @@ from pathlib import Path
 
 import sales_backend
 from planning.categories import DEFAULT_CAPACITY, GROUPS, PLANNING_CATEGORIES
+from planning.recommendations import DEFAULT_CLOSE_DATE
 
 DATA_DIR = Path(os.environ.get('MARATHON_DATA_DIR', Path(__file__).parent / 'planning_data'))
 NAMES = ('plan', 'complimentary', 'campaigns')
@@ -21,7 +22,7 @@ NAMES = ('plan', 'complimentary', 'campaigns')
 def seed(name):
     base = {'schema_version': 1, 'revision': 0, 'history': []}
     if name == 'plan':
-        return base | {'capacity': dict(DEFAULT_CAPACITY),
+        return base | {'capacity': dict(DEFAULT_CAPACITY), 'close_date': DEFAULT_CLOSE_DATE,
             'allocation': {group: {category: 0 for category in PLANNING_CATEGORIES} for group in GROUPS}}
     if name == 'complimentary':
         return base | {'programmes': [], 'issuances': []}
@@ -69,6 +70,10 @@ def validate(name, data):
         for group in GROUPS:
             for category in PLANNING_CATEGORIES:
                 _whole(data['allocation'].get(group, {}).get(category), f'{group} · {category}')
+        try:
+            date.fromisoformat(data.get('close_date', DEFAULT_CLOSE_DATE))
+        except (TypeError, ValueError):
+            raise ValueError('Registration close date must be a valid date.') from None
     elif name == 'complimentary':
         _unique_names(data['programmes'], 'programme')
         tags = [tag.casefold() for programme in data['programmes'] for tag in programme['tags']]

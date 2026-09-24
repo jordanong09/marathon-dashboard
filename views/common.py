@@ -14,6 +14,7 @@ from planning.categories import PLANNING_CATEGORIES
 from planning.company_matching import link_registration_names
 from planning.complimentary_tags import absorb_new_tags
 from planning.metrics import capacity_series, plan_matrix, utilized_matrix
+from planning.recommendations import DEFAULT_CLOSE_DATE
 
 DOCUMENTS = ('plan', 'complimentary', 'campaigns', 'corporate')
 
@@ -88,7 +89,10 @@ def planning_context(data, promo_column):
     tags = {tag.casefold(): programme['name'] for programme in comp['programmes'] for tag in programme['tags']}
     codes = {code: campaign['name'] for campaign in campaigns['campaigns'] for code in campaign['codes']}
     attributed = None if data is None else attribute(data, promo_column, aliases, tags, codes)
+    dates = registration_dates(data).dropna()
     return {'docs': docs, 'data': data, 'promo_column': promo_column, 'attributed': attributed, 'corporate_links': links,
+        'close_date': docs['plan'].get('close_date', DEFAULT_CLOSE_DATE),
+        'latest_date': dates.max().normalize() if len(dates) else pd.Timestamp.today().normalize(),
         'plan': plan_matrix(docs['plan']), 'capacity': capacity_series(docs['plan']),
         'utilized': utilized_matrix(sales['orders'], comp['issuances'], attributed)}
 
