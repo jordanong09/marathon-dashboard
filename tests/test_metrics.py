@@ -73,6 +73,14 @@ def test_gaps_report_over_allocation_oversold_and_low_utilization():
     assert levels == sorted(levels, key=['error', 'warning', 'info'].index)
 
 
+def test_unplanned_group_gets_one_warning_not_cell_errors():
+    doc = plan_doc()
+    utilized = utilized_matrix([{'quantities': {'5 km': 3, '10 km': 2}, 'cancelled': False}], [], None)
+    messages = gaps(plan_matrix(doc), utilized, capacity_series(doc), None)
+    assert ('warning', 'Corporate: 5 utilized but no plan allocation yet') in messages
+    assert not any(level == 'error' for level, _ in messages)
+
+
 def test_unmatched_codes():
     registrations = attributed([
         ['Local Retail', '', '5 km', 'MEDIC', '', False, ''],

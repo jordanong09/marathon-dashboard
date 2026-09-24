@@ -73,6 +73,11 @@ def gaps(plan, utilized, capacity, attributed, low_share=0.5):
     items = []
     remaining = plan - utilized
     for group in GROUPS:
+        if not plan.loc[group].any():
+            used = utilized.loc[group].sum(min_count=1)
+            if pd.notna(used) and used > 0:
+                items.append(('warning', f'{group}: {used:,.0f} utilized but no plan allocation yet'))
+            continue
         for category in PLANNING_CATEGORIES:
             value = remaining.loc[group, category]
             if pd.notna(value) and value < 0:
