@@ -8,8 +8,9 @@ SUFFIXES = {'pte', 'ltd', 'limited', 'private', 'inc', 'llp', 'llc', 'co', 'corp
 
 
 def normalize_company(name):
-    """Casefold, drop punctuation and trailing legal suffixes: 'SUNWAY MCL LIMITED' -> 'sunway mcl'."""
-    words = re.sub(r'[^0-9a-z]+', ' ', str(name).casefold()).split()
+    """Casefold, drop bracketed notes, punctuation and trailing legal suffixes: 'Siemens Pte Ltd (Sharon)' -> 'siemens'."""
+    text = re.sub(r'\([^)]*\)|\[[^\]]*\]', ' ', str(name).casefold())
+    words = re.sub(r'[^0-9a-z]+', ' ', text).split()
     while words and words[-1] in SUFFIXES:
         words.pop()
     return ' '.join(words)
