@@ -250,7 +250,10 @@ def full_app_script(page, csv_text):
     upload = UploadedFile(UploadedFileRec('sample', 'registrations.csv', 'text/csv', csv_text.encode()), FileURLs())
     st.session_state.setdefault('workspace_page', page)
     st.sidebar.file_uploader = lambda *args, **kwargs: upload
-    runpy.run_path(str(Path('app.py').resolve()), run_name='__main__')
+    try:
+        runpy.run_path(str(Path('app.py').resolve()), run_name='__main__')
+    finally:
+        st.sidebar.__dict__.pop('file_uploader', None)  # later sessions must not see this upload
 
 
 @pytest.mark.parametrize('page', PAGES + ['Overview', 'Daily registration', 'Groups & complimentary', 'Audience & markets', 'Reports & data'])
@@ -301,3 +304,43 @@ def test_campaigns_of_one_family_can_be_merged(local_store):
     assert not app.exception, app.exception
     merged = doc_store.read('campaigns')['campaigns']
     assert [(c['name'], c['codes']) for c in merged] == [('RGSIM', ['RGSIM1', 'RGSIM2'])]
+
+
+PERSONAL_CSV = '''Registration Date,Full Name,Email,Current Age,Gender,Country,Category Name,Group/Corporate Name,Promo Code - Code
+01/09/2026 10:00,Tan Ah Kow,tan@example.com,34,Male,Singapore,BYD Marathon (42.195KM),GROUP_REGISTRATION_Acme Batch 1 - Tan Hui Hoon,
+02/09/2026 11:00,Lim Mei,lim@example.com,28,Female,Malaysia,adidas Half Marathon (21.1KM),,EARLY10
+03/09/2026 12:00,Raj Kumar,raj@example.com,41,Female,Singapore,5km Fun Run,COMPLIMENTARY_KOL,
+'''
+
+
+def no_upload_app_script(page):
+    import runpy
+    from pathlib import Path
+    import streamlit as st
+    st.session_state.setdefault('workspace_page', page)
+    runpy.run_path(str(Path('app.py').resolve()), run_name='__main__')
+
+
+def test_upload_is_stored_reduced_and_shown_to_the_next_user(local_store, monkeypatch):
+    import registration_snapshot
+    from pathlib import Path
+    monkeypatch.chdir(Path(__file__).resolve().parent.parent)
+    uploader = AppTest.from_function(full_app_script, args=('Executive Summary', PERSONAL_CSV), default_timeout=120)
+    uploader.run()
+    assert not uploader.exception, uploader.exception
+    assert any('Stored for everyone: 3 registrations' in s.value for s in uploader.sidebar.success)
+    frame, meta = registration_snapshot.read()
+    assert 'Full Name' not in frame.columns and 'Email' not in frame.columns
+    assert 'Tan Hui Hoon' not in frame.to_csv() and meta['rows'] == 3
+    assert meta['selection']['promo_code'] == 'Promo Code - Code'
+    for page in ['Executive Summary', 'Overview', 'Corporate Sales']:
+        viewer = AppTest.from_function(no_upload_app_script, args=(page,), default_timeout=120)
+        viewer.run()
+        assert not viewer.exception, viewer.exception
+        assert any('Showing the latest stored registrations: registrations.csv · 3 registrations' in c.value for c in viewer.caption)
+    summary = AppTest.from_function(no_upload_app_script, args=('Executive Summary',), default_timeout=120)
+    summary.run()
+    assert any('3 registrations' in m.value for m in summary.markdown)
+    summary.checkbox(key='confirm_snapshot_delete').check().run()
+    summary.button(key='delete_snapshot').click().run()
+    assert registration_snapshot.read() is None

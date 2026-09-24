@@ -16,7 +16,7 @@ Clean deployment copy for a **private, company-owned GitHub repository**.
 - `scripts/benchmark.py`: times every page on a synthetic registration file (`python scripts/benchmark.py 60000`). Target: each page responds in about 2 seconds after the CSV has loaded.
 
 ## What happens on each registration upload
-The CSV is never stored. Each upload is compared with the saved records:
+Each upload is stored as the shared registration snapshot, so everyone else sees it without uploading. Only the columns the app uses are kept (dates, category, age, gender, country, nationality, group/corporate name without coordinator names, promo code, add-ons); names, emails, phone numbers and IDs are dropped, and each upload replaces the previous snapshot. Each upload is also compared with the saved records:
 - New `COMPLIMENTARY_` tags are saved as complimentary programmes (or linked to a programme with the same name).
 - Promo codes that no campaign claims are grouped into families by their leading letters (RGSIM1, RG-SIM-2 → RGSIM); a lone code keeps its own name (EARLY10). Groups with 5+ registrations are saved as automatic campaigns and later codes of the same family join them; smaller groups wait under Campaigns → Detected codes. Campaigns already saved separately but sharing a family are offered as a one-click merge.
 - Company names in `GROUP_REGISTRATION_` rows are matched to Corporate Sales companies, ignoring case, punctuation, bracketed notes and suffixes such as Pte/Ltd; confirm matches under Corporate Sales → Companies.

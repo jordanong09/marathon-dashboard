@@ -4,7 +4,7 @@ Use a PRIVATE company-owned repository and a PRIVATE Streamlit app. Repository p
 
 ## Setup
 1. Upload this bundle's contents to the private repository, including the hidden .streamlit/config.toml and .gitignore. Do not upload master registration CSVs, local sales JSON, real secrets, the Windows Python runtime, or backups. The bundled promo_lists contains real campaign codes: keep the repository private.
-2. In the company's Supabase project SQL Editor, run supabase_setup.sql. It creates the private sales store and the planning documents store (plan, complimentary, campaigns), each with a revision archive and server-only functions. It is safe to rerun without resetting any records — rerun it after each update that changes the file.
+2. In the company's Supabase project SQL Editor, run supabase_setup.sql. It creates the private sales store, the planning documents store (plan, complimentary, campaigns) and the registration snapshot, each with a revision archive and server-only functions. It is safe to rerun without resetting any records — rerun it after each update that changes the file.
 3. In Streamlit Community Cloud, connect the company GitHub account/organisation, choose this repository and app.py, and select Python 3.13. Organisation approval may be required for private repository access.
 4. In Streamlit app Settings > Secrets, paste secrets.example.toml and replace the URL and key. Use a Supabase server SECRET key (sb_secret_), not the publishable key. Never commit the real secrets file. Keep `require_supabase = true`: the app then refuses to save anywhere except Supabase. The adapter uses Supabase's HTTPS Data API, so no database password or PostgreSQL pooler is needed.
 5. Set the Streamlit app to private and invite only trial editors. Confirm a non-invited account cannot open it BEFORE loading company records.
@@ -21,7 +21,7 @@ Download the sales backup from the existing local app. Preserve this original fi
 - Campaigns: campaigns, shared codes, uploaded unique code lists and campaigns detected automatically from promo codes.
 - Prior saved versions of every record remain in Supabase; Download sales backup exports the current corporate record.
 
-Only the registration CSV is not stored: it holds personal data and the app is hosted in the US. A fresh browser session needs the master CSV uploaded again for registration-based figures (campaign and retail utilization, conversion, conflicts).
+- Registrations: the latest upload only, reduced to the columns the app uses (no names, emails, phone numbers, IDs or group coordinator names). Each upload replaces it for everyone; "Stored registration snapshot" in the sidebar shows when it was uploaded and can delete it. Staff upload the registration CSV each morning; everyone else sees that snapshot without uploading.
 
 ## Operational limits
 No silent local fallback: when Supabase is unavailable, saving stops. After an uncertain save, reload to check whether it completed before retrying. Other users see changes after Reload saved records; this is not live push synchronization. Revision archives are in the same database, so also download a backup at the end of each trial day. Free-tier availability and limits apply. Streamlit Community Cloud hosts the app in the US, even if Supabase is in Singapore; use a sanitized master sheet unless the company permits this processing location.
