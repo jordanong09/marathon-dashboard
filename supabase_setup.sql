@@ -92,4 +92,43 @@ revoke all on function public.marathon_doc_read(text) from public, anon, authent
 revoke all on function public.marathon_doc_save(text, jsonb, bigint, text) from public, anon, authenticated;
 grant execute on function public.marathon_doc_read(text) to service_role;
 grant execute on function public.marathon_doc_save(text, jsonb, bigint, text) to service_role;
+-- Latest registration upload, reduced to the columns the app uses (added 2026-09-25). One row; each upload replaces it.
+create table if not exists marathon_private.registration_snapshot (
+ id integer primary key check (id = 1),
+ uploaded_at timestamptz not null,
+ meta jsonb not null,
+ content text not null
+);
+alter table marathon_private.registration_snapshot enable row level security;
+revoke all on marathon_private.registration_snapshot from public, anon, authenticated;
+create or replace function public.marathon_snapshot_meta() returns jsonb
+language sql security definer set search_path = '' as $$
+ select meta || jsonb_build_object('uploaded_at', uploaded_at) from marathon_private.registration_snapshot where id = 1;
+$$;
+create or replace function public.marathon_snapshot_read() returns jsonb
+language sql security definer set search_path = '' as $$
+ select jsonb_build_object('meta', meta || jsonb_build_object('uploaded_at', uploaded_at), 'content', content)
+ from marathon_private.registration_snapshot where id = 1;
+$$;
+create or replace function public.marathon_snapshot_save(p_meta jsonb, p_content text) returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare saved_time timestamptz := clock_timestamp();
+begin
+ insert into marathon_private.registration_snapshot(id, uploaded_at, meta, content) values (1, saved_time, p_meta, p_content)
+ on conflict (id) do update set uploaded_at = excluded.uploaded_at, meta = excluded.meta, content = excluded.content;
+ return p_meta || jsonb_build_object('uploaded_at', saved_time);
+end;
+$$;
+create or replace function public.marathon_snapshot_delete() returns jsonb
+language sql security definer set search_path = '' as $$
+ delete from marathon_private.registration_snapshot where id = 1 returning jsonb_build_object('deleted', true);
+$$;
+revoke all on function public.marathon_snapshot_meta() from public, anon, authenticated;
+revoke all on function public.marathon_snapshot_read() from public, anon, authenticated;
+revoke all on function public.marathon_snapshot_save(jsonb, text) from public, anon, authenticated;
+revoke all on function public.marathon_snapshot_delete() from public, anon, authenticated;
+grant execute on function public.marathon_snapshot_meta() to service_role;
+grant execute on function public.marathon_snapshot_read() to service_role;
+grant execute on function public.marathon_snapshot_save(jsonb, text) to service_role;
+grant execute on function public.marathon_snapshot_delete() to service_role;
 commit;

@@ -6,6 +6,7 @@ from admin_dashboard import style_dashboard, workspace_navigation, render_chart
 from planning.capacity_segments import classify_capacity_segments
 from planning.categories import PLANNING_CATEGORIES
 from views.router import PLANNING_PAGES, render_planning_page
+import registration_snapshot
 import re
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -4221,6 +4222,78 @@ def show_unavailable_message(field_name):
 # FILE UPLOAD
 # =========================================================
 
+@st.cache_data(ttl=60, show_spinner=False)
+def stored_snapshot_meta():
+    """Metadata of the shared registration snapshot (checked at most once a minute)."""
+    return registration_snapshot.read_meta()
+
+
+@st.cache_data(max_entries=2, show_spinner="Loading the latest stored registrations...")
+def stored_snapshot_frame(uploaded_at):
+    stored = registration_snapshot.read()
+    return None if stored is None else stored[0]
+
+
+def load_stored_snapshot():
+    """(frame, metadata) of the latest stored upload, or None when nothing is stored."""
+    meta = stored_snapshot_meta()
+    if not meta:
+        return None
+    frame = stored_snapshot_frame(meta["uploaded_at"])
+    return None if frame is None else (frame, meta)
+
+
+def forget_stored_snapshot():
+    stored_snapshot_meta.clear()
+    stored_snapshot_frame.clear()
+
+
+def store_uploaded_registrations(uploaded_file, source_df, selection, group_corporate_column):
+    """Save this upload, reduced to the selected columns, as the snapshot every user sees."""
+    key = "snapshot_saved_" + uploaded_file.file_id + "_" + str(sorted(selection.items(), key=str))
+    if key in st.session_state:
+        return st.session_state[key]
+    reduced = registration_snapshot.minimize(source_df, list(selection.values()), group_corporate_column)
+    try:
+        meta = registration_snapshot.save(reduced, uploaded_file.name, selection)
+    except (OSError, ValueError) as error:
+        st.sidebar.error(f"This upload was not stored for other users: {error}")
+        return None
+    st.session_state[key] = meta
+    forget_stored_snapshot()
+    st.sidebar.success(f"Stored for everyone: {meta['rows']:,} registrations (only the columns this app uses).")
+    return meta
+
+
+def render_snapshot_panel(meta, from_upload):
+    """Freshness banner and delete control for the shared registration snapshot."""
+    if not meta:
+        return
+    stamp = pd.Timestamp(meta["uploaded_at"])
+    stamp = (stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp).tz_convert("Asia/Singapore")
+    minutes = (pd.Timestamp.now(tz="Asia/Singapore") - stamp).total_seconds() / 60
+    ago = f"{minutes:.0f} min ago" if minutes < 60 else f"{minutes / 60:.0f} h ago" if minutes < 48 * 60 else f"{minutes / 1440:.0f} days ago"
+    summary = f"{meta['file_name']} · {meta['rows']:,} registrations · uploaded {stamp:%d %b %Y %H:%M} ({ago})"
+    if not from_upload:
+        st.caption("Showing the latest stored registrations: " + summary + ". Upload a newer CSV in the sidebar to replace it for everyone.")
+        if minutes > 24 * 60:
+            st.warning("The stored registrations are more than a day old. Upload today's registration CSV to refresh them.")
+    st.sidebar.caption("Stored registrations: " + summary)
+    with st.sidebar.expander("Stored registration snapshot"):
+        st.caption("Each upload replaces the stored copy for everyone. Only the columns this app uses are stored; "
+            "names, emails, phone numbers, IDs and group coordinator names are dropped.")
+        confirm = st.checkbox("I want to delete the stored registrations", key="confirm_snapshot_delete")
+        if st.button("Delete stored registrations", disabled=not confirm, key="delete_snapshot"):
+            try:
+                registration_snapshot.delete()
+            except (OSError, ValueError) as error:
+                st.error(f"Not deleted: {error}")
+            else:
+                forget_stored_snapshot()
+                st.session_state.pop("confirm_snapshot_delete", None)
+                st.rerun()
+
+
 page = workspace_navigation()
 
 uploaded_file = st.sidebar.file_uploader(
@@ -4232,14 +4305,28 @@ uploaded_file = st.sidebar.file_uploader(
     ),
 )
 
+snapshot_meta = None
+
 if uploaded_file is None:
-    if page in PLANNING_PAGES:
-        render_planning_page(page, None, None)
+    try:
+        stored_snapshot = load_stored_snapshot()
+    except (OSError, ValueError) as error:
+        stored_snapshot = None
+        st.sidebar.warning(f"Stored registrations could not be loaded: {error}")
+
+    if stored_snapshot is None:
+        if page in PLANNING_PAGES:
+            render_planning_page(page, None, None)
+            st.stop()
+        st.info(
+            "Upload a registration CSV file to begin."
+        )
         st.stop()
-    st.info(
-        "Upload a registration CSV file to begin."
-    )
-    st.stop()
+
+    source_df, snapshot_meta = stored_snapshot
+    source_name = snapshot_meta["file_name"]
+else:
+    source_name = uploaded_file.name
 
 
 # =========================================================
@@ -4247,7 +4334,8 @@ if uploaded_file is None:
 # =========================================================
 
 try:
-    source_df = read_csv_file(uploaded_file)
+    if uploaded_file is not None:
+        source_df = read_csv_file(uploaded_file)
 
 except Exception as error:
     st.error(
@@ -4320,6 +4408,21 @@ detected_promo_code = detect_column(
     source_df.columns,
     COLUMN_ALIASES["promo_code"],
 )
+
+# A stored snapshot keeps the column choices made when it was uploaded.
+if snapshot_meta and snapshot_meta.get("selection"):
+    _stored_selection = snapshot_meta["selection"]
+    detected_date = _stored_selection.get("registration_date", detected_date)
+    detected_age = _stored_selection.get("age", detected_age)
+    detected_gender = _stored_selection.get("gender", detected_gender)
+    detected_country = _stored_selection.get("country", detected_country)
+    detected_nationality = _stored_selection.get("nationality", detected_nationality)
+    detected_category = _stored_selection.get("category", detected_category)
+    detected_group_corporate = _stored_selection.get("group_corporate", detected_group_corporate)
+    detected_addon_bag = _stored_selection.get("addon_bag", detected_addon_bag)
+    detected_addon_itab = _stored_selection.get("addon_itab", detected_addon_itab)
+    detected_addon_runflex = _stored_selection.get("addon_runflex", detected_addon_runflex)
+    detected_promo_code = _stored_selection.get("promo_code", detected_promo_code)
 
 with st.expander(
     "Source-column configuration",
@@ -4487,6 +4590,28 @@ except Exception as error:
     )
     st.stop()
 
+if uploaded_file is not None:
+    snapshot_meta = store_uploaded_registrations(
+        uploaded_file,
+        source_df,
+        {
+            "registration_date": registration_date_column,
+            "age": age_column,
+            "gender": gender_column,
+            "country": country_column,
+            "nationality": nationality_column,
+            "category": category_column,
+            "group_corporate": group_corporate_column,
+            "addon_bag": addon_bag_column,
+            "addon_itab": addon_itab_column,
+            "addon_runflex": addon_runflex_column,
+            "promo_code": promo_code_column,
+        },
+        group_corporate_column,
+    )
+
+render_snapshot_panel(snapshot_meta, from_upload=uploaded_file is not None)
+
 
 # =========================================================
 # SIDEBAR FILTERS
@@ -4506,7 +4631,7 @@ def reset_filters():
         if key.startswith("filter_"):
             del st.session_state[key]
 
-upload_signature = (uploaded_file.name, len(source_df), tuple(str(v) for v in (valid_dates.min(),valid_dates.max())), tuple(available_categories))
+upload_signature = (source_name, len(source_df), tuple(str(v) for v in (valid_dates.min(),valid_dates.max())), tuple(available_categories))
 if st.session_state.get("upload_filter_signature") != upload_signature:
     reset_filters()
     st.session_state.upload_filter_signature = upload_signature
@@ -4728,7 +4853,7 @@ if page == "Reports & data":
         }
     )
 
-original_filename = Path(uploaded_file.name).stem
+original_filename = Path(source_name).stem
 
 momentum_period_df = filtered_df[
     filtered_df["Registration Date Only"].notna()
