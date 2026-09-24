@@ -10,6 +10,7 @@ import doc_store
 import sales_backend
 from planning.attribution import attribute
 from planning.categories import PLANNING_CATEGORIES
+from planning.company_matching import link_registration_names
 from planning.metrics import capacity_series, plan_matrix, utilized_matrix
 
 DOCUMENTS = ('plan', 'complimentary', 'campaigns', 'corporate')
@@ -73,11 +74,15 @@ def planning_context(data, promo_column):
         st.error(f'Cannot read saved planning records: {error}. Nothing has been changed.')
         return None
     sales, comp, campaigns = docs['corporate'], docs['complimentary'], docs['campaigns']
+    company_names = {company['id']: company['name'] for company in sales['companies']}
+    registration_names = [] if data is None else sorted(data['Corporate Group'].dropna().astype(str).loc[lambda s: s.str.strip().ne('')].unique())
+    links = link_registration_names(sales['companies'], registration_names)
     aliases = {alias.casefold(): company['name'] for company in sales['companies'] for alias in company['aliases']}
+    aliases |= {name.casefold(): company_names[company_id] for name, (company_id, _) in links.items()}
     tags = {tag.casefold(): programme['name'] for programme in comp['programmes'] for tag in programme['tags']}
     codes = {code: campaign['name'] for campaign in campaigns['campaigns'] for code in campaign['codes']}
     attributed = None if data is None else attribute(data, promo_column, aliases, tags, codes)
-    return {'docs': docs, 'data': data, 'promo_column': promo_column, 'attributed': attributed,
+    return {'docs': docs, 'data': data, 'promo_column': promo_column, 'attributed': attributed, 'corporate_links': links,
         'plan': plan_matrix(docs['plan']), 'capacity': capacity_series(docs['plan']),
         'utilized': utilized_matrix(sales['orders'], comp['issuances'], attributed)}
 
