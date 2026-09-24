@@ -1,19 +1,16 @@
-"""Promo-code campaigns: shared or unique codes, registrations and unmatched codes."""
+"""Promo-code campaigns: detected or created, their registrations and when they ran."""
 from __future__ import annotations
 
 import uuid
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 from planning.campaign_codes import read_code_file
+from planning.campaign_detection import AUTO_NOTE, MIN_AUTO_REGISTRATIONS, campaign_activity, detect_code_groups
 from planning.categories import PLANNING_CATEGORIES
-from planning.metrics import unmatched_codes
-from views.common import needs_upload, save_doc, target_strip
-
-PROMO_FOLDER = Path(__file__).resolve().parent.parent / 'promo_lists'
+from views.common import needs_upload, registration_dates, save_doc, target_strip
 
 
 def _iso(value):
@@ -24,14 +21,8 @@ def _date(value):
     return date.fromisoformat(value) if value else None
 
 
-def seed_campaigns():
-    """Build unique-code campaigns from the legacy promo_lists folder (one-time import)."""
-    campaigns = []
-    for file in sorted(PROMO_FOLDER.glob('*.xlsx')):
-        parsed = read_code_file(file.name, file.read_bytes())
-        campaigns.append({'id': uuid.uuid4().hex, 'name': file.stem, 'type': 'unique', 'codes': parsed['codes'],
-            'cap': parsed['cap'], 'start': None, 'end': parsed['end'], 'notes': 'Imported from promo_lists'})
-    return campaigns
+def _day(value):
+    return None if pd.isna(value) else pd.Timestamp(value).date()
 
 
 def render_campaigns(ctx):
@@ -41,33 +32,33 @@ def render_campaigns(ctx):
     campaigns = doc['campaigns']
     names = {c['id']: c['name'] for c in campaigns}
     attributed = ctx['attributed']
-    overview, manage, codes_tab, unmatched_tab = st.tabs(['Overview', 'Campaigns', 'Codes', 'Unmatched codes'])
+    dates = registration_dates(ctx['data'])
+    overview, manage, codes_tab, detected_tab = st.tabs(['Overview', 'Campaigns', 'Codes', 'Detected codes'])
 
     with overview:
         if not campaigns:
-            st.info('No campaigns yet. Create one under Campaigns.')
-            if PROMO_FOLDER.exists() and any(PROMO_FOLDER.glob('*.xlsx')) and st.button('Import existing KL Half code lists (one-time)'):
-                try:
-                    seeded = seed_campaigns()
-                except (ValueError, OSError, KeyError) as error:
-                    st.error(f'Import failed: {error}')
-                else:
-                    save_doc('campaigns', doc | {'campaigns': seeded}, 'Imported promo_lists campaigns')
+            st.info(f'No campaigns yet. Upload the registration CSV: promo codes used {MIN_AUTO_REGISTRATIONS}+ times are saved as campaigns automatically, or create one under Campaigns.')
         else:
-            registered = None
+            registered = activity = None
             if attributed is not None:
                 rows = attributed[attributed['Group'].eq('Campaign')]
                 registered = pd.crosstab(rows['Subgroup'], rows['Planning Category']).reindex(columns=PLANNING_CATEGORIES, fill_value=0)
+                activity = campaign_activity(attributed['Campaign'], dates).set_index('Campaign')
             table = []
             for c in campaigns:
                 counts = registered.loc[c['name']] if registered is not None and c['name'] in registered.index else None
                 total = None if registered is None else int(counts.sum()) if counts is not None else 0
-                table.append({'Campaign': c['name'], 'Type': c['type'], 'Codes': len(c['codes']), 'Cap': c.get('cap'),
-                    'Registrations': total, 'Uses left': c['cap'] - total if c.get('cap') is not None and total is not None else None,
-                    'Starts': c.get('start'), 'Closes': c.get('end'),
+                active = activity.loc[c['name']] if activity is not None and c['name'] in activity.index else None
+                table.append({'Campaign': c['name'], 'Source': 'Auto' if c.get('auto') else 'Manual', 'Codes': len(c['codes']),
+                    'Registrations': total, 'Last 7 days': None if activity is None else int(active['Last 7 days']) if active is not None else 0,
+                    'First registered': None if active is None else _day(active['First registered']),
+                    'Last registered': None if active is None else _day(active['Last registered']),
+                    'Cap': c.get('cap'), 'Uses left': c['cap'] - total if c.get('cap') is not None and total is not None else None,
+                    'Planned start': c.get('start'), 'Planned end': c.get('end'),
                     **{cat: (None if registered is None else int(counts[cat]) if counts is not None else 0) for cat in PLANNING_CATEGORIES}})
             st.dataframe(pd.DataFrame(table), hide_index=True, width='stretch')
-            st.caption('Registrations count once per participant. Participants also tagged corporate or complimentary stay in that group and are listed as conflicts in the Executive Summary.')
+            st.caption('Registrations count once per participant (people also tagged corporate or complimentary stay in that group). '
+                'First/Last registered and Last 7 days use every use of the campaign codes, so they show when a campaign actually ran.')
             needs_upload(ctx)
 
     with manage:
@@ -144,9 +135,31 @@ def render_campaigns(ctx):
                     drop = set(c['codes']) if remove_all else {line.strip() for line in text.splitlines()}
                     replace_codes([code for code in c['codes'] if code not in drop], f"Codes removed from {c['name']}")
 
-    with unmatched_tab:
+    with detected_tab:
         if not needs_upload(ctx):
-            table = unmatched_codes(attributed).rename_axis('Promo code').reset_index(name='Registrations')
-            st.caption('Promo codes used in registrations that no campaign claims yet (e.g. Medic codes). Add them to a campaign to track them.')
-            st.dataframe(table, hide_index=True, width='stretch')
-            st.download_button('Download unmatched codes', table.to_csv(index=False), 'unmatched-codes.csv', 'text/csv')
+            claimed = {code for c in campaigns for code in c['codes']}
+            groups = detect_code_groups(attributed['Promo Code'], dates, claimed)
+            st.caption(f'Promo codes in this upload that no campaign claims, grouped by their stem (EARLY10 and EARLY20 → EARLY). '
+                f'Groups with {MIN_AUTO_REGISTRATIONS}+ registrations become campaigns automatically; add smaller ones here.')
+            if groups.empty:
+                st.success('Every promo code in this upload belongs to a campaign.')
+            else:
+                shown = groups.assign(**{'Codes': groups['Codes'].map(', '.join),
+                    'First registered': groups['First registered'].map(_day), 'Last registered': groups['Last registered'].map(_day)})
+                st.dataframe(shown, hide_index=True, width='stretch')
+                st.download_button('Download detected codes', shown.to_csv(index=False), 'detected-codes.csv', 'text/csv')
+                chosen = st.multiselect('Groups to act on', groups['Prefix'].tolist(), key='detected_chosen')
+                picked = groups[groups['Prefix'].isin(chosen)]
+                left, right = st.columns(2)
+                if left.button('Create one campaign per group', disabled=picked.empty, key='detected_create'):
+                    existing = {c['name'].casefold() for c in campaigns}
+                    new = [{'id': uuid.uuid4().hex, 'name': prefix if prefix.casefold() not in existing else f'{prefix} (auto)', 'type': 'shared',
+                        'codes': codes, 'cap': None, 'start': None, 'end': None, 'notes': AUTO_NOTE, 'auto': True, 'prefix': prefix}
+                        for prefix, codes in zip(picked['Prefix'], picked['Codes'])]
+                    save_doc('campaigns', doc | {'campaigns': campaigns + new}, 'Campaigns created from detected codes: ' + ', '.join(chosen))
+                if campaigns:
+                    target = right.selectbox('…or add their codes to', list(names), format_func=names.get, key='detected_target')
+                    if right.button('Add codes to this campaign', disabled=picked.empty, key='detected_add'):
+                        codes = [code for group_codes in picked['Codes'] for code in group_codes]
+                        updated = [c | {'codes': list(dict.fromkeys(c['codes'] + codes))} if c['id'] == target else c for c in campaigns]
+                        save_doc('campaigns', doc | {'campaigns': updated}, f'{len(codes)} detected codes added to {names[target]}')

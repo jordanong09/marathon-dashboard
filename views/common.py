@@ -8,7 +8,8 @@ import streamlit as st
 
 import doc_store
 import sales_backend
-from planning.attribution import attribute
+from planning.attribution import attribute, clean_codes
+from planning.campaign_detection import absorb_detected, detect_code_groups
 from planning.categories import PLANNING_CATEGORIES
 from planning.company_matching import link_registration_names
 from planning.complimentary_tags import absorb_new_tags
@@ -82,6 +83,8 @@ def planning_context(data, promo_column):
     aliases |= {name.casefold(): company_names[company_id] for name, (company_id, _) in links.items()}
     if data is not None:
         comp = docs['complimentary'] = capture_complimentary_tags(comp, data)
+        if promo_column:
+            campaigns = docs['campaigns'] = capture_campaign_codes(campaigns, data, promo_column)
     tags = {tag.casefold(): programme['name'] for programme in comp['programmes'] for tag in programme['tags']}
     codes = {code: campaign['name'] for campaign in campaigns['campaigns'] for code in campaign['codes']}
     attributed = None if data is None else attribute(data, promo_column, aliases, tags, codes)
@@ -106,6 +109,33 @@ def capture_complimentary_tags(comp, data):
     st.session_state['doc_snapshot_complimentary'] = saved
     parts = [f'{len(added)} new complimentary programme(s) added: {", ".join(added)}'] if added else []
     parts += [f'{len(attached)} tag(s) linked to existing programmes: {", ".join(attached)}'] if attached else []
+    st.success(' · '.join(parts) + '. Saved from this registration upload.')
+    return saved
+
+
+def registration_dates(data):
+    if data is None or 'Registration Date Only' not in data:
+        return pd.Series(pd.NaT, index=None if data is None else data.index)
+    return data['Registration Date Only']
+
+
+def capture_campaign_codes(campaigns, data, promo_column):
+    """Save promo-code groups with enough registrations as automatic campaigns; extend existing ones."""
+    claimed = {code for campaign in campaigns['campaigns'] for code in campaign['codes']}
+    groups = detect_code_groups(clean_codes(data[promo_column]), registration_dates(data), claimed)
+    updated, created, extended = absorb_detected(campaigns['campaigns'], groups)
+    if not created and not extended:
+        return campaigns
+    changed = campaigns | {'campaigns': updated}
+    action = 'Detected campaigns from upload: ' + ', '.join(created + extended)
+    try:
+        saved = doc_store.save('campaigns', changed, campaigns['revision'], action)
+    except (ValueError, OSError) as error:
+        st.warning(f'Campaign codes detected ({", ".join(created + extended)}) but not saved: {error} They are counted for this session only.')
+        return changed
+    st.session_state['doc_snapshot_campaigns'] = saved
+    parts = [f'{len(created)} new campaign(s) detected: {", ".join(created)}'] if created else []
+    parts += [f'new codes added to: {", ".join(dict.fromkeys(extended))}'] if extended else []
     st.success(' · '.join(parts) + '. Saved from this registration upload.')
     return saved
 

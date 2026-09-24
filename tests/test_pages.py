@@ -152,6 +152,42 @@ def test_complimentary_tags_are_captured_saved_and_tracked(local_store):
     assert doc_store.read('complimentary')['revision'] == saved['revision']
 
 
+def campaign_detection_script():
+    import pandas as pd
+    from views.router import render_planning_page
+    codes = ['EARLY10'] * 3 + ['EARLY20'] * 3 + ['MEDIC1'] * 2 + ['']
+    data = pd.DataFrame({
+        'Grouped Category': ['5km'] * len(codes),
+        'Corporate Group': [None] * len(codes),
+        'Complimentary Programme': [None] * len(codes),
+        'Market': ['Singapore'] * len(codes),
+        'Promo': codes,
+        'Registration Date Only': pd.to_datetime(['2026-05-01', '2026-05-02', '2026-09-20', '2026-09-21', '2026-09-22', '2026-09-23',
+            '2026-06-01', '2026-06-02', '2026-09-23']),
+    })
+    render_planning_page('Campaigns', data, 'Promo')
+
+
+def test_campaigns_are_detected_dated_and_small_groups_can_be_added(local_store):
+    import doc_store
+    app = AppTest.from_function(campaign_detection_script, default_timeout=30)
+    app.run()
+    assert not app.exception, app.exception
+    assert any('1 new campaign(s) detected: EARLY' in s.value for s in app.success)
+    saved = doc_store.read('campaigns')['campaigns']
+    assert [(c['name'], sorted(c['codes']), c['auto']) for c in saved] == [('EARLY', ['EARLY10', 'EARLY20'], True)]
+    overview = next(d.value for d in app.dataframe if 'Source' in d.value.columns).set_index('Campaign')
+    assert overview.loc['EARLY', ['Registrations', 'Last 7 days']].tolist() == [6, 4]
+    assert str(overview.loc['EARLY', 'First registered']) == '2026-05-01'
+    assert str(overview.loc['EARLY', 'Last registered']) == '2026-09-23'
+    detected = next(d.value for d in app.dataframe if 'Prefix' in d.value.columns)
+    assert detected['Prefix'].tolist() == ['MEDIC'] and detected['Registrations'].tolist() == [2]
+    app.multiselect(key='detected_chosen').select('MEDIC')
+    app.button(key='detected_create').click().run()
+    assert not app.exception, app.exception
+    assert [c['name'] for c in doc_store.read('campaigns')['campaigns']] == ['EARLY', 'MEDIC']
+
+
 SAMPLE_CSV = '''Registration Date,Current Age,Gender,Country,Category Name,Group/Corporate Name,Promo Code - Code
 01/09/2026 10:00,34,Male,Singapore,BYD Marathon (42.195KM),GROUP_REGISTRATION_Acme Batch 1 - Tan,
 02/09/2026 11:00,28,Female,Malaysia,adidas Half Marathon (21.1KM),,EARLY
