@@ -11,6 +11,7 @@ import sales_backend
 from planning.attribution import attribute
 from planning.categories import PLANNING_CATEGORIES
 from planning.company_matching import link_registration_names
+from planning.complimentary_tags import absorb_new_tags
 from planning.metrics import capacity_series, plan_matrix, utilized_matrix
 
 DOCUMENTS = ('plan', 'complimentary', 'campaigns', 'corporate')
@@ -79,12 +80,34 @@ def planning_context(data, promo_column):
     links = link_registration_names(sales['companies'], registration_names)
     aliases = {alias.casefold(): company['name'] for company in sales['companies'] for alias in company['aliases']}
     aliases |= {name.casefold(): company_names[company_id] for name, (company_id, _) in links.items()}
+    if data is not None:
+        comp = docs['complimentary'] = capture_complimentary_tags(comp, data)
     tags = {tag.casefold(): programme['name'] for programme in comp['programmes'] for tag in programme['tags']}
     codes = {code: campaign['name'] for campaign in campaigns['campaigns'] for code in campaign['codes']}
     attributed = None if data is None else attribute(data, promo_column, aliases, tags, codes)
     return {'docs': docs, 'data': data, 'promo_column': promo_column, 'attributed': attributed, 'corporate_links': links,
         'plan': plan_matrix(docs['plan']), 'capacity': capacity_series(docs['plan']),
         'utilized': utilized_matrix(sales['orders'], comp['issuances'], attributed)}
+
+
+def capture_complimentary_tags(comp, data):
+    """Save complimentary tags seen in the upload as programmes; keep the saved ones untouched."""
+    found = data['Complimentary Programme'].dropna().astype(str).tolist() if 'Complimentary Programme' in data else []
+    programmes, added, attached = absorb_new_tags(comp['programmes'], found)
+    if not added and not attached:
+        return comp
+    changed = comp | {'programmes': programmes}
+    action = 'Captured complimentary tags from upload: ' + ', '.join(added + attached)
+    try:
+        saved = doc_store.save('complimentary', changed, comp['revision'], action)
+    except (ValueError, OSError) as error:
+        st.warning(f'New complimentary tags found ({", ".join(added + attached)}) but not saved: {error} They are counted for this session only.')
+        return changed
+    st.session_state['doc_snapshot_complimentary'] = saved
+    parts = [f'{len(added)} new complimentary programme(s) added: {", ".join(added)}'] if added else []
+    parts += [f'{len(attached)} tag(s) linked to existing programmes: {", ".join(attached)}'] if attached else []
+    st.success(' · '.join(parts) + '. Saved from this registration upload.')
+    return saved
 
 
 def fmt(value):
